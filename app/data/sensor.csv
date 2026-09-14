@@ -1,0 +1,6 @@
+sensor_type,unit,description
+pH,escala,Sensor eletroquimico de pH com compensacao de temperatura
+EC,mS/cm,Sensor de condutividade eletrica
+Temperatura,°C,Termistor NTC 10k
+Umidade,%,Sensor capacitivo de umidade
+Nutrientes,ppm,Sensor iônico especifico
