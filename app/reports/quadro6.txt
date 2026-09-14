@@ -1,0 +1,16 @@
+
+Quadro 6 - Desempenho comparativo dos modelos preditivos (pH)
+------------------------------------------------------------------------
+Modelo                               RMSE        MAE   MAPE (%)
+ARIMA (univariado)                 0.0393     0.0309       0.55
+LSTM (multivariado)                0.0775     0.0657       1.17
+Reducao relativa LSTM vs ARIMA      97.2%     112.8%     113.7%
+Diebold-Mariano: stat=-24.033  p-value=0.0000  ->  diferenca significativa (rejeita H0)
+
+Quadro 6 - Desempenho comparativo dos modelos preditivos (EC)
+------------------------------------------------------------------------
+Modelo                               RMSE        MAE   MAPE (%)
+ARIMA (univariado)                 0.1325     0.0477       1.96
+LSTM (multivariado)                0.1293     0.0726       2.95
+Reducao relativa LSTM vs ARIMA      -2.4%      52.2%      50.0%
+Diebold-Mariano: stat=1.711  p-value=0.0873  ->  diferenca nao significativa

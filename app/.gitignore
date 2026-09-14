@@ -2,8 +2,3 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
-db/hidroponia.sqlite3
-models/artifacts/*
-reports/*
-!reports/.gitkeep
-!models/artifacts/.gitkeep
