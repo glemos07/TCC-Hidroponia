@@ -11,6 +11,7 @@ O parametro `fonte` escolhe o par (vetor de entrada, artefatos treinados):
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import joblib
@@ -54,13 +55,31 @@ def models_available(fonte: str = "kaggle") -> dict[str, bool]:
             for t in ("pH", "EC")}
 
 
+@lru_cache(maxsize=8)
+def _carregar_cached(model_path: Path, scaler_path: Path, _assinatura: tuple):
+    """
+    Carrega modelo + scaler do disco. Chave inclui a assinatura (mtime/tamanho)
+    dos arquivos, entao retreinar invalida o cache sozinho.
+    """
+    tf = _lazy_tf()
+    return tf.keras.models.load_model(model_path), joblib.load(scaler_path)
+
+
 def _carregar(target: str, fonte: str):
-    """Modelo + scaler da fonte, ou (None, None) se ainda nao foram treinados."""
+    """
+    Modelo + scaler da fonte, ou (None, None) se ainda nao foram treinados.
+
+    O resultado fica em cache no processo: carregar o .keras do disco custa
+    ~8 s, e sem cache cada rerun do Streamlit pagaria isso de novo, o que
+    inviabiliza acompanhar os sensores ao vivo.
+    """
     model_path, scaler_path = _model_paths(target, fonte)
     if not model_path.exists() or not scaler_path.exists():
         return None, None
-    tf = _lazy_tf()
-    return tf.keras.models.load_model(model_path), joblib.load(scaler_path)
+
+    assinatura = tuple((p.stat().st_mtime_ns, p.stat().st_size)
+                       for p in (model_path, scaler_path))
+    return _carregar_cached(model_path, scaler_path, assinatura)
 
 
 def _intervalo_min(hist: pd.DataFrame) -> float:

@@ -17,6 +17,8 @@ from app_utils import header, sidebar_info, PH_MIN, PH_MAX, EC_MIN, EC_MAX
 from src.api_client import ApiIndisponivel, ServidorSensores, resumo_simulados
 from src.api_ingest import resumo_ingestao, sincronizar, ultima_leitura_importada
 from src.config import API_BASE_URL, API_ID_FAZENDA
+from src.data_loader import plantas_api as plantas_ingeridas
+from src.predict import models_available, predict_next
 
 st.set_page_config(page_title="Servidor de sensores", page_icon="📡", layout="wide")
 
@@ -119,59 +121,135 @@ if not plantas_api.empty:
 st.markdown("---")
 st.markdown("### Telemetria recente")
 
-n_linhas = st.slider("Leituras exibidas", 20, 1000, 200, step=20)
-try:
-    recentes = api.leituras(id_planta=id_planta, limite=n_linhas)
-except ApiIndisponivel as e:
-    st.error(f"Falha ao consultar leituras: {e}")
-    st.stop()
+col_n, col_vivo, col_sync, col_prev = st.columns([2, 1, 1, 1])
+n_linhas = col_n.slider("Leituras exibidas", 20, 1000, 200, step=20)
+ao_vivo = col_vivo.toggle(
+    "Ao vivo", value=False,
+    help="Atualiza a tela sozinha. O ESP32 publica a cada 90 s.",
+)
+auto_sync = col_sync.toggle(
+    "Importar sozinho", value=False,
+    help="A cada atualizacao, grava no banco as leituras novas (~0,2 s).",
+)
+prever = col_prev.toggle(
+    "Prever", value=False,
+    help="Roda o LSTM sobre o historico importado a cada atualizacao (~1 s).",
+)
+intervalo = st.select_slider(
+    "Intervalo de atualizacao", options=[5, 10, 15, 30, 60], value=10,
+    format_func=lambda s: f"{s} s", disabled=not ao_vivo,
+)
 
-if recentes.empty:
-    st.info("O servidor ainda nao recebeu nenhuma leitura do ESP32.")
-else:
-    ultima = recentes.iloc[-1]
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("pH", _fmt(ultima["ph"]),
-              _faixa(ultima["ph"], PH_MIN, PH_MAX))
-    m2.metric("CE (mS/cm)", _fmt(ultima["ec"]),
-              _faixa(ultima["ec"], EC_MIN, EC_MAX))
-    m3.metric("Temp. solucao (C)", _fmt(ultima["temp_agua"]))
-    m4.metric("Temp. ambiente (C)", _fmt(ultima["temp_ambiente"]))
-    m5.metric("Ultima leitura", pd.Timestamp(ultima["timestamp"]).strftime("%d/%m %H:%M:%S"))
 
-    simulados = resumo_simulados(recentes["sensores_simulados"])
-    if simulados != "nenhum":
-        st.warning(f"Sensores em modo simulado no periodo exibido: {simulados}")
+def painel_ao_vivo(limite: int, sincronizar_tambem: bool, prever_tambem: bool):
+    """
+    Bloco que se atualiza sozinho. E um fragment para que apenas ele
+    reexecute: recarregar a pagina inteira a cada poucos segundos refaria
+    tambem as consultas de catalogo, sem necessidade.
+    """
+    try:
+        recentes = api.leituras(id_planta=id_planta, limite=limite)
+    except ApiIndisponivel as e:
+        st.error(f"Falha ao consultar leituras: {e}")
+        return
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["ph"],
-                             name="pH", line=dict(color="#1f4e79", width=2)))
-    fig.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["ec"],
-                             name="CE (mS/cm)", line=dict(color="#c00000", width=2),
-                             yaxis="y2"))
-    fig.update_layout(
-        title="pH e CE recebidos pela API",
-        xaxis_title="Tempo",
-        yaxis=dict(title="pH"),
-        yaxis2=dict(title="CE (mS/cm)", overlaying="y", side="right"),
-        margin=dict(t=50, b=40),
-        legend=dict(orientation="h", y=1.12),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    if sincronizar_tambem:
+        try:
+            rel = sincronizar(api, id_fazenda=fazenda, id_planta=id_planta)
+            if rel.novas:
+                st.success(f"{rel.novas} leitura(s) nova(s) importada(s) agora.")
+        except ApiIndisponivel as e:
+            st.warning(f"Importacao automatica falhou: {e}")
 
-    fig_t = go.Figure()
-    fig_t.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["temp_agua"],
-                               name="Solucao", line=dict(color="#1f77b4", width=2)))
-    fig_t.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["temp_ambiente"],
-                               name="Ambiente", line=dict(color="#ff7f0e", width=2)))
-    fig_t.update_layout(title="Temperaturas (C)", xaxis_title="Tempo",
-                        yaxis_title="C", margin=dict(t=50, b=40),
-                        legend=dict(orientation="h", y=1.12))
-    st.plotly_chart(fig_t, use_container_width=True)
+    _desenhar(recentes)
+    if prever_tambem:
+        _prever_ao_vivo()
+    st.caption(f"Atualizado em {datetime.now():%H:%M:%S}")
 
-    with st.expander("Tabela bruta recebida da API"):
-        st.dataframe(recentes.sort_values("timestamp", ascending=False),
-                     use_container_width=True, hide_index=True)
+
+def _prever_ao_vivo():
+    """Previsao do LSTM sobre o historico ja importado, recalculada a cada ciclo."""
+    plantas = plantas_ingeridas()
+    if plantas.empty or int(plantas["leituras"].max() or 0) == 0:
+        st.info("Ligue *Importar sozinho* para alimentar o modelo com as leituras.")
+        return
+    if not all(models_available("api").values()):
+        st.info("Modelos dos sensores nao treinados: rode `python -m src.evaluate api`.")
+        return
+
+    id_plant = int(plantas["id_plant"].iloc[0])
+    st.markdown("**Previsao do LSTM sobre as leituras ja importadas**")
+    cols = st.columns(2)
+    for coluna, (alvo, lo, hi) in zip(cols, [("pH", PH_MIN, PH_MAX),
+                                             ("EC", EC_MIN, EC_MAX)]):
+        r = predict_next(id_plant, target=alvo, fonte="api")
+        if r is None:
+            coluna.info(f"{alvo}: historico insuficiente para a janela do modelo.")
+            continue
+        coluna.metric(
+            f"{alvo} previsto (+{r['horizon_min']:.0f} min)",
+            f"{r['predicted']:.3f}",
+            delta=f"{r['predicted'] - r['last_value']:+.3f}",
+        )
+        if not (lo <= r["predicted"] <= hi):
+            coluna.warning(f"Previsao fora da faixa ideal ({lo}-{hi})")
+
+
+def _desenhar(recentes: pd.DataFrame):
+    if recentes.empty:
+        st.info("O servidor ainda nao recebeu nenhuma leitura do ESP32.")
+    else:
+        ultima = recentes.iloc[-1]
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("pH", _fmt(ultima["ph"]),
+                  _faixa(ultima["ph"], PH_MIN, PH_MAX))
+        m2.metric("CE (mS/cm)", _fmt(ultima["ec"]),
+                  _faixa(ultima["ec"], EC_MIN, EC_MAX))
+        m3.metric("Temp. solucao (C)", _fmt(ultima["temp_agua"]))
+        m4.metric("Temp. ambiente (C)", _fmt(ultima["temp_ambiente"]))
+        m5.metric("Ultima leitura", pd.Timestamp(ultima["timestamp"]).strftime("%d/%m %H:%M:%S"))
+
+        simulados = resumo_simulados(recentes["sensores_simulados"])
+        if simulados != "nenhum":
+            st.warning(f"Sensores em modo simulado no periodo exibido: {simulados}")
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["ph"],
+                                 name="pH", line=dict(color="#1f4e79", width=2)))
+        fig.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["ec"],
+                                 name="CE (mS/cm)", line=dict(color="#c00000", width=2),
+                                 yaxis="y2"))
+        fig.update_layout(
+            title="pH e CE recebidos pela API",
+            xaxis_title="Tempo",
+            yaxis=dict(title="pH"),
+            yaxis2=dict(title="CE (mS/cm)", overlaying="y", side="right"),
+            margin=dict(t=50, b=40),
+            legend=dict(orientation="h", y=1.12),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        fig_t = go.Figure()
+        fig_t.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["temp_agua"],
+                                   name="Solucao", line=dict(color="#1f77b4", width=2)))
+        fig_t.add_trace(go.Scatter(x=recentes["timestamp"], y=recentes["temp_ambiente"],
+                                   name="Ambiente", line=dict(color="#ff7f0e", width=2)))
+        fig_t.update_layout(title="Temperaturas (C)", xaxis_title="Tempo",
+                            yaxis_title="C", margin=dict(t=50, b=40),
+                            legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig_t, use_container_width=True)
+
+        with st.expander("Tabela bruta recebida da API"):
+            st.dataframe(recentes.sort_values("timestamp", ascending=False),
+                         use_container_width=True, hide_index=True)
+
+
+# `run_every` e fixado quando o fragment e criado, entao ele e montado aqui,
+# ja com o intervalo escolhido na tela (None = so atualiza por interacao).
+_painel = st.experimental_fragment(
+    run_every=intervalo if ao_vivo else None
+)(painel_ao_vivo)
+_painel(n_linhas, auto_sync, prever)
 
 # ------------------------------------------------------------- estatisticas
 

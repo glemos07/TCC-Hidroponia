@@ -136,7 +136,31 @@ Uma leitura é reconhecida pelo id remoto **ou** pelo par (planta, instante) —
 builds antigas do servidor, sem a restrição `UNIQUE` de hoje, aceitaram a mesma
 leitura duas vezes com ids diferentes.
 
-### 4.4 Tratamento aplicado na entrada (Quadro 1)
+### 4.4 Modo ao vivo (apresentação)
+
+A tela **10_Servidor_API** tem três interruptores no bloco *Telemetria recente*:
+
+| Interruptor | O que faz | Custo por ciclo |
+|---|---|---|
+| **Ao vivo** | a tela se atualiza sozinha no intervalo escolhido (5–60 s) | — |
+| **Importar sozinho** | grava no banco as leituras novas a cada ciclo | ~0,2 s |
+| **Prever** | roda o LSTM sobre o histórico importado a cada ciclo | ~1,6 s |
+
+Com os três ligados, um ciclo completo leva **~2,2 s**; só com telemetria,
+menos de 1 s. O bloco é um *fragment*: apenas ele reexecuta, não a página toda.
+
+Limites honestos para a banca:
+
+- **O ESP32 publica a cada 90 s.** Esse é o piso: por mais curto que seja o
+  intervalo da tela, um valor novo só aparece quando o hardware envia. Ajustar
+  isso é mudança no firmware, não na aplicação.
+- **A tela 10 exige rede** até o servidor. As telas 4, 6, 8 e 9 funcionam
+  offline, sobre as leituras já importadas — se a rede do local falhar, o
+  histórico e a previsão continuam apresentáveis. Sincronize antes de começar.
+- O modelo carregado fica em cache no processo (`src/predict.py`); sem isso
+  cada ciclo pagaria ~8 s para reler o `.keras` do disco.
+
+### 4.5 Tratamento aplicado na entrada (Quadro 1)
 
 As mesmas regras de qualidade usadas no dataset Kaggle valem para a telemetria:
 
