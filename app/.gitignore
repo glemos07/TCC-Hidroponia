@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+models/artifacts/*
+reports/*
+!reports/.gitkeep
+!models/artifacts/.gitkeep
+!data/.gitkeep
+

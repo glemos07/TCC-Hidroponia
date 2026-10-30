@@ -1,83 +1,130 @@
-"""Carrega séries temporais de pH, CE, temperatura e umidade.
+"""Carrega séries temporais multivariadas para os modelos preditivos.
 
-Prefere o CSV `timeseries_full.csv` (série longa, para treino de ML) quando
-disponível; caso contrário lê do SQLite (Quadro 2 do doc, série truncada).
+Duas fontes, sem nenhum dado gerado artificialmente:
+
+  - "api": telemetria real do ESP32 ingerida por `src.api_ingest` e lida do
+    banco (pH, CE, temperatura da solucao, temperatura do ar). E a fonte de
+    operacao do sistema.
+  - "kaggle": dataset publico de hidroponia lido direto do CSV em
+    `data/kaggle/`, mantido apenas como base de comparacao do Quadro 6 /
+    hipotese H1. Nao entra no banco: o banco guarda somente o que os
+    sensores mediram.
+
+O vetor de entrada de cada fonte esta em `config.FEATURE_SETS`.
 """
 from __future__ import annotations
 
 import pandas as pd
 
-from src.config import DATA_DIR
+from src.config import SENSOR_TO_FEATURE, features_de
 from src.database import connect
 
 
-SENSOR_MAP = {
-    "pH":          1,
-    "EC":          2,
-    "temperature": 3,
-    "humidity":    4,
-}
+def load_timeseries(fonte: str = "kaggle") -> pd.DataFrame:
+    """Serie multivariada da fonte escolhida, pronta para ARIMA/LSTM."""
+    if fonte == "api":
+        return load_timeseries_api()
+    if fonte == "kaggle":
+        return _load_kaggle()
+    raise ValueError(f"Fonte desconhecida: {fonte!r}. Use 'api' ou 'kaggle'.")
 
 
-def load_timeseries(prefer_full: bool = True) -> pd.DataFrame:
+def _load_kaggle() -> pd.DataFrame:
+    """Serie do dataset publico, lida do CSV (nunca do banco)."""
+    from src.kaggle_loader import load_kaggle_csv
+
+    resultado = load_kaggle_csv()
+    if resultado is None:
+        raise FileNotFoundError(
+            "Nenhum CSV encontrado em data/kaggle/. Baixe o dataset do Kaggle "
+            "para comparar com o Quadro 6, ou use a fonte 'api' para treinar "
+            "sobre os dados dos sensores."
+        )
+    df, _relatorio = resultado
+    return df[["timestamp"] + features_de("kaggle")]
+
+
+def _tabela_existe(conn, nome: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (nome,)
+    ).fetchone() is not None
+
+
+def plantas_api() -> pd.DataFrame:
     """
-    Ordem de preferencia:
-      1. CSV do Kaggle em data/kaggle/ (via kaggle_loader) - dado real
-      2. CSV timeseries_full.csv (gerador sintetico com serie longa para ML)
-      3. Banco SQLite (serie truncada, alinhada ao Quadro 2 do doc)
+    Plantas cujo historico veio da API, da mais para a menos amostrada.
+    Colunas: id_plant (chave em PLANTS), id_planta (chave no ESP32),
+    nome_planta, leituras.
     """
-    if prefer_full:
-        # 1) Kaggle real
-        try:
-            from src.kaggle_loader import load_kaggle_csv
-            r = load_kaggle_csv()
-            if r is not None:
-                df, _ = r
-                return df[["timestamp", "pH", "EC", "temperature", "humidity"]]
-        except Exception:
-            pass
-        # 2) sintetico longo
-        csv_full = DATA_DIR / "timeseries_full.csv"
-        if csv_full.exists():
-            df = pd.read_csv(csv_full)
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            return df[["timestamp", "pH", "EC", "temperature", "humidity"]]
-    # 3) SQLite
-    return _load_from_db()
+    vazio = pd.DataFrame(columns=["id_plant", "id_planta", "nome_planta", "leituras"])
+    with connect() as conn:
+        if not _tabela_existe(conn, "api_planta"):
+            return vazio
+        return pd.read_sql_query(
+            """
+            SELECT ap.id_plant         AS id_plant,
+                   ap.id_planta        AS id_planta,
+                   ap.nome_planta      AS nome_planta,
+                   COUNT(l.id_remoto)  AS leituras
+            FROM   api_planta ap
+            LEFT   JOIN api_leitura l ON l.id_planta = ap.id_planta
+            GROUP  BY ap.id_planta
+            ORDER  BY leituras DESC
+            """,
+            conn,
+        )
 
 
-def _load_from_db() -> pd.DataFrame:
-    """Retorna DataFrame com timestamp e colunas pH, EC, temperature, humidity."""
+def load_timeseries_api(id_plant: int | None = None) -> pd.DataFrame:
+    """
+    Serie da telemetria real ingerida da API.
+
+    Sem `id_plant`, usa a planta com mais leituras - treinar um unico modelo
+    concatenando plantas diferentes criaria saltos artificiais na serie.
+    """
+    features = features_de("api")
+    if id_plant is None:
+        plantas = plantas_api()
+        if plantas.empty or int(plantas["leituras"].iloc[0]) == 0:
+            return pd.DataFrame(columns=["timestamp"] + features)
+        id_plant = int(plantas["id_plant"].iloc[0])
+
+    return load_plant_features(int(id_plant), features)
+
+
+def load_plant_features(id_plant: int, features: list[str]) -> pd.DataFrame:
+    """
+    Historico de uma planta em formato largo: uma coluna por feature.
+    Compartilhado entre o treino (api) e a inferencia (src.predict).
+    """
     sql = """
-    SELECT m.id            AS monitoring_id,
-           m.dt_register   AS timestamp,
-           s.sensor_type   AS sensor_type,
-           sd.value        AS value
+    SELECT m.dt_register AS timestamp,
+           s.sensor_type AS sensor_type,
+           sd.value      AS value
     FROM   monitoring m
     JOIN   sensor_data sd ON sd.id_monitoring = m.id
     JOIN   sensor s       ON s.id = sd.id_sensor
-    WHERE  s.sensor_type IN ('pH', 'EC', 'Temperatura', 'Umidade')
+    WHERE  m.id_plant = ?
+    ORDER  BY m.dt_register
     """
     with connect() as conn:
-        df = pd.read_sql_query(sql, conn)
+        df = pd.read_sql_query(sql, conn, params=(int(id_plant),))
 
+    if df.empty:
+        return pd.DataFrame(columns=["timestamp"] + features)
+
+    df["feature"] = df["sensor_type"].map(SENSOR_TO_FEATURE)
+    df = df[df["feature"].isin(features)]
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["sensor_type"] = df["sensor_type"].map({
-        "pH":           "pH",
-        "EC":           "EC",
-        "Temperatura":  "temperature",
-        "Umidade":      "humidity",
-    })
-    wide = (df.pivot_table(index="timestamp",
-                           columns="sensor_type",
-                           values="value",
-                           aggfunc="mean")
+
+    wide = (df.pivot_table(index="timestamp", columns="feature",
+                           values="value", aggfunc="mean")
               .sort_index()
               .reset_index())
-    for col in ["pH", "EC", "temperature", "humidity"]:
+    for col in features:
         if col not in wide.columns:
             wide[col] = float("nan")
-    return wide[["timestamp", "pH", "EC", "temperature", "humidity"]].dropna().reset_index(drop=True)
+    return wide[["timestamp"] + features].dropna().reset_index(drop=True)
 
 
 def train_test_split_series(df: pd.DataFrame, test_frac: float = 0.20):

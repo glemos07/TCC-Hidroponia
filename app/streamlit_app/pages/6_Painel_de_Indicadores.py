@@ -31,7 +31,7 @@ stats = fetch_df("""
            AVG(sd.value) AS media
     FROM sensor_data sd
     JOIN sensor s ON s.id = sd.id_sensor
-    WHERE s.sensor_type IN ('pH', 'EC', 'Temperatura', 'Umidade')
+    WHERE s.sensor_type IN ('pH', 'EC', 'Temperatura', 'Umidade', 'Temperatura Ambiente')
     GROUP BY s.sensor_type
 """)
 st.dataframe(stats.round(3), use_container_width=True)

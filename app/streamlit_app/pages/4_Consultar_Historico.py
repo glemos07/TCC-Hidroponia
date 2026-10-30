@@ -18,7 +18,22 @@ id_plant = st.selectbox(
     plants["id"],
     format_func=lambda i: plants.loc[plants["id"] == i, "name_plant"].values[0],
 )
-sensor_opt = st.selectbox("Sensor", ["pH", "EC", "Temperatura", "Umidade"])
+# lista apenas os sensores que a planta realmente possui: o conjunto varia
+# conforme a origem do dado (dataset tem umidade, o ESP32 tem temp. ambiente)
+sensores = fetch_df("""
+    SELECT DISTINCT s.sensor_type
+    FROM monitoring m
+    JOIN sensor_data sd ON sd.id_monitoring = m.id
+    JOIN sensor s ON s.id = sd.id_sensor
+    WHERE m.id_plant = ?
+    ORDER BY s.sensor_type
+""", params=(int(id_plant),))
+
+if sensores.empty:
+    st.info("Esta planta ainda nao possui leituras registradas.")
+    st.stop()
+
+sensor_opt = st.selectbox("Sensor", sensores["sensor_type"].tolist())
 
 df = fetch_df("""
     SELECT m.dt_register, sd.value, s.sensor_type

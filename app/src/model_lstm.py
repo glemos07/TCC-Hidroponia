@@ -18,10 +18,20 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-from src.config import LSTM_WINDOW, FORECAST_HORIZON_STEPS, MODELS_DIR, RANDOM_SEED
+from src.config import (
+    ARTIFACT_SUFFIX,
+    FORECAST_HORIZON_STEPS,
+    LSTM_WINDOW,
+    MAX_GAP_FACTOR,
+    MODELS_DIR,
+    RANDOM_SEED,
+    features_de,
+)
 from src.data_loader import load_timeseries, train_test_split_series
 
-FEATURES = ["pH", "EC", "temperature", "humidity"]
+#: Vetor de entrada da fonte padrao (Kaggle). Para a telemetria do ESP32 o
+#: conjunto e outro - ver `config.FEATURE_SETS` e o parametro `fonte` de `run`.
+FEATURES = features_de("kaggle")
 
 
 def _lazy_tf():
@@ -34,18 +44,36 @@ def _lazy_tf():
 
 def build_supervised_delta(values: np.ndarray, target_raw: np.ndarray,
                            window: int, target_idx: int,
-                           horizon: int = FORECAST_HORIZON_STEPS):
+                           horizon: int = FORECAST_HORIZON_STEPS,
+                           timestamps: np.ndarray | None = None,
+                           max_gap_min: float | None = None):
     """
     X = janela escalada [i, i+window)
     delta = target_raw[i+window+horizon-1] - target_raw[i+window-1]
     y_ref = target_raw[i+window-1]   (valor "atual" para reconstruir)
     y_final = target_raw[i+window+horizon-1]  (valor real a prever)
+
+    `timestamps` + `max_gap_min` descartam janelas que atravessam uma
+    interrupcao da coleta: a telemetria do ESP32 tem lacunas de horas ou dias
+    (queda de energia, rede fora), e uma janela que as cruze ensinaria o
+    modelo a interpretar como variacao de minutos o que levou dias.
+    Series ja reamostradas em grade regular dispensam os dois argumentos.
     """
+    sem_lacuna = None
+    if timestamps is not None and max_gap_min:
+        deltas_min = np.diff(timestamps).astype("timedelta64[s]").astype(float) / 60.0
+        # prefixo acumulado permite testar cada janela em tempo constante
+        prefixo = np.concatenate([[0], np.cumsum(deltas_min > max_gap_min)])
+        sem_lacuna = prefixo
+
     X, delta, y_ref, y_final = [], [], [], []
     for i in range(len(values) - window - horizon + 1):
+        fim = i + window + horizon - 1
+        if sem_lacuna is not None and sem_lacuna[fim] - sem_lacuna[i] > 0:
+            continue
         X.append(values[i: i + window])
         cur = float(target_raw[i + window - 1])
-        fut = float(target_raw[i + window + horizon - 1])
+        fut = float(target_raw[fim])
         delta.append(fut - cur)
         y_ref.append(cur)
         y_final.append(fut)
@@ -69,31 +97,69 @@ def build_model(window: int, n_features: int):
     return model
 
 
-def run(target: str = "pH", epochs: int = 200, batch_size: int = 64) -> dict:
-    tf = _lazy_tf()
+def run(target: str = "pH", epochs: int = 200, batch_size: int = 64,
+        fonte: str = "kaggle") -> dict:
+    """
+    Treina e avalia o LSTM da fonte indicada.
 
-    df = load_timeseries()
+    fonte="kaggle" grava `lstm_<alvo>.keras` (artefatos do Quadro 6);
+    fonte="api" grava `lstm_<alvo>_api.keras`, treinado sobre a telemetria
+    real do ESP32. Os dois convivem sem se sobrescrever.
+    """
+    tf = _lazy_tf()
+    features = features_de(fonte)
+    sufixo = ARTIFACT_SUFFIX[fonte]
+
+    df = load_timeseries(fonte=fonte)
+    minimo = LSTM_WINDOW + FORECAST_HORIZON_STEPS
+    if len(df) < minimo * 2:
+        raise ValueError(
+            f"Serie da fonte '{fonte}' tem apenas {len(df)} leituras; "
+            f"o LSTM precisa de pelo menos {minimo * 2} "
+            f"(janela {LSTM_WINDOW} + horizonte {FORECAST_HORIZON_STEPS}, treino e teste)."
+        )
     train_df, test_df = train_test_split_series(df, test_frac=0.20)
 
     scaler = StandardScaler()
-    scaler.fit(train_df[FEATURES].values)
-    train_scaled = scaler.transform(train_df[FEATURES].values)
-    test_scaled  = scaler.transform(test_df[FEATURES].values)
+    scaler.fit(train_df[features].values)
+    train_scaled = scaler.transform(train_df[features].values)
+    test_scaled  = scaler.transform(test_df[features].values)
 
-    target_idx = FEATURES.index(target)
+    target_idx = features.index(target)
     target_train_raw = train_df[target].values
     target_test_raw  = test_df[target].values
 
+    # A serie do Kaggle ja vem reamostrada em grade de 1 min; a da API chega
+    # como o ESP32 conseguiu enviar, com lacunas. So nesse caso ha janelas a
+    # descartar - manter o Kaggle intocado preserva os numeros do Quadro 6.
+    ts_train = ts_test = max_gap = None
+    if fonte == "api":
+        ts_train = train_df["timestamp"].values
+        ts_test = test_df["timestamp"].values
+        intervalo = float(pd.Series(df["timestamp"]).diff().dt.total_seconds().median() / 60)
+        max_gap = MAX_GAP_FACTOR * max(intervalo, 1e-6)
+
     X_train, d_train, _, _ = build_supervised_delta(
-        train_scaled, target_train_raw, LSTM_WINDOW, target_idx)
+        train_scaled, target_train_raw, LSTM_WINDOW, target_idx,
+        timestamps=ts_train, max_gap_min=max_gap)
 
     # concatena o fim de treino para gerar as janelas iniciais de teste
     combined_scaled = np.concatenate([train_scaled[-LSTM_WINDOW:], test_scaled], axis=0)
     combined_raw    = np.concatenate([target_train_raw[-LSTM_WINDOW:], target_test_raw])
+    combined_ts = (np.concatenate([ts_train[-LSTM_WINDOW:], ts_test])
+                   if ts_train is not None else None)
     X_test, d_test, y_ref_test, y_true = build_supervised_delta(
-        combined_scaled, combined_raw, LSTM_WINDOW, target_idx)
+        combined_scaled, combined_raw, LSTM_WINDOW, target_idx,
+        timestamps=combined_ts, max_gap_min=max_gap)
 
-    model = build_model(LSTM_WINDOW, len(FEATURES))
+    if len(X_train) == 0 or len(X_test) == 0:
+        raise ValueError(
+            f"Nenhuma janela continua de {LSTM_WINDOW}+{FORECAST_HORIZON_STEPS} passos "
+            f"sobrou na fonte '{fonte}' apos descartar as que cruzam lacunas de coleta. "
+            "Colete um historico mais continuo ou reduza LSTM_WINDOW."
+        )
+
+    model = build_model(LSTM_WINDOW, len(features))
     early = tf.keras.callbacks.EarlyStopping(
         monitor="val_loss", patience=20, restore_best_weights=True
     )
@@ -114,7 +180,8 @@ def run(target: str = "pH", epochs: int = 200, batch_size: int = 64) -> dict:
 
     out = {
         "target":      target,
-        "features":    FEATURES,
+        "fonte":       fonte,
+        "features":    features,
         "window":      LSTM_WINDOW,
         "horizon":     FORECAST_HORIZON_STEPS,
         "train_size":  len(X_train),
@@ -124,18 +191,21 @@ def run(target: str = "pH", epochs: int = 200, batch_size: int = 64) -> dict:
         "timestamps":  test_df["timestamp"].astype(str).tolist()[-len(y_pred):],
     }
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model.save(MODELS_DIR / f"lstm_{target}.keras")
-    joblib.dump(scaler, MODELS_DIR / f"lstm_{target}_scaler.joblib")
-    with open(MODELS_DIR / f"lstm_{target}_result.json", "w", encoding="utf-8") as f:
+    model.save(MODELS_DIR / f"lstm_{target}{sufixo}.keras")
+    joblib.dump(scaler, MODELS_DIR / f"lstm_{target}{sufixo}_scaler.joblib")
+    with open(MODELS_DIR / f"lstm_{target}{sufixo}_result.json", "w", encoding="utf-8") as f:
         json.dump(out, f)
     return out
 
 
 if __name__ == "__main__":
+    import sys
+
     from src.metrics import rmse, mae, mape
 
+    fonte_cli = sys.argv[1] if len(sys.argv) > 1 else "kaggle"
     for tgt in ["pH", "EC"]:
-        r = run(target=tgt)
-        print(f"[LSTM {tgt}] RMSE={rmse(r['y_true'], r['y_pred']):.4f} "
+        r = run(target=tgt, fonte=fonte_cli)
+        print(f"[LSTM {tgt} | {fonte_cli}] RMSE={rmse(r['y_true'], r['y_pred']):.4f} "
               f"MAE={mae(r['y_true'], r['y_pred']):.4f} "
               f"MAPE={mape(r['y_true'], r['y_pred']):.2f}%")

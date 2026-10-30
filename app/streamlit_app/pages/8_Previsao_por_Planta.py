@@ -1,36 +1,72 @@
 """
 Previsao de pH e CE para uma planta especifica.
-Usa os LSTMs treinados em src.model_lstm sobre o historico da planta.
+
+Usa os LSTMs treinados sobre a telemetria do ESP32 (`python -m src.evaluate api`)
+aplicados ao historico da planta no banco. A comparacao ARIMA x LSTM sobre o
+dataset publico esta na tela 9.
 """
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from app_utils import header, sidebar_info, PH_MIN, PH_MAX, EC_MIN, EC_MAX
-from src.config import LSTM_WINDOW, FORECAST_HORIZON_STEPS
+from src.config import (
+    FORECAST_HORIZON_STEPS,
+    LSTM_WINDOW,
+    MAX_GAP_FACTOR,
+    features_de,
+)
+from src.data_loader import plantas_api
 from src.database import fetch_df
 from src.predict import (
     load_plant_history, models_available,
     predict_next, predict_trajectory,
 )
 
+#: Rotulo amigavel de cada feature, para os indicadores de situacao atual.
+ROTULO_FEATURE = {
+    "pH":          ("pH atual", ""),
+    "EC":          ("CE atual (mS/cm)", ""),
+    "temperature": ("Temp. da solucao (C)", ""),
+    "humidity":    ("Umidade do ar (%)", ""),
+    "air_temp":    ("Temp. do ambiente (C)", ""),
+}
+
 sidebar_info()
 header("Previsao de pH e CE por planta",
        "Selecione uma planta cadastrada para ver a previsao com o LSTM treinado")
 
-plants = fetch_df("SELECT p.id, p.name_plant, p.diversity, fs.status_name "
-                  "FROM plants p JOIN farm_status fs ON fs.id=p.status_id "
-                  "ORDER BY p.name_plant")
-if plants.empty:
-    st.warning("Nenhuma planta cadastrada. Execute o seed em RF07.")
+# A previsao por planta le o historico do banco, e o banco guarda apenas o que
+# os sensores mediram - por isso a fonte aqui e sempre "api". A comparacao com
+# o dataset do Kaggle vive na tela 9, sobre o conjunto de teste daquela base.
+fonte = "api"
+features = features_de(fonte)
+st.caption("Fonte: sensores do ESP32 | vetor de entrada: " + ", ".join(features))
+
+ingeridas = plantas_api()
+if ingeridas.empty or int(ingeridas["leituras"].max() or 0) == 0:
+    st.warning(
+        "Nenhuma leitura dos sensores foi importada ainda. "
+        "Abra a tela **10_Servidor_API** e sincronize o servidor."
+    )
     st.stop()
 
-avail = models_available()
+plants = fetch_df(
+    "SELECT p.id, p.name_plant, p.diversity, fs.status_name "
+    "FROM plants p JOIN farm_status fs ON fs.id = p.status_id "
+    f"WHERE p.id IN ({','.join(str(int(i)) for i in ingeridas['id_plant'])}) "
+    "ORDER BY p.name_plant"
+)
+if plants.empty:
+    st.warning("Nenhuma planta com leituras de sensor. Sincronize na tela 10_Servidor_API.")
+    st.stop()
+
+avail = models_available(fonte)
 if not (avail.get("pH") and avail.get("EC")):
     st.error(
-        "Modelos LSTM ainda nao treinados.\n\n"
+        "Modelos LSTM dos sensores ainda nao treinados.\n\n"
         "No PowerShell, do diretorio `app/`, rode:\n\n"
-        "    python -m src.evaluate"
+        "    python -m src.evaluate api"
     )
     st.stop()
 
@@ -50,10 +86,10 @@ with col_r:
         f"Cada passo previsto corresponde a **{FORECAST_HORIZON_STEPS} intervalos** de coleta a frente."
     )
 
-hist = load_plant_history(int(id_plant))
+hist = load_plant_history(int(id_plant), fonte=fonte)
 if len(hist) < LSTM_WINDOW:
     st.warning(
-        f"Planta possui apenas {len(hist)} leituras. "
+        f"Planta possui apenas {len(hist)} leituras completas. "
         f"O LSTM precisa de pelo menos {LSTM_WINDOW}."
     )
     st.stop()
@@ -62,17 +98,32 @@ st.markdown("---")
 st.markdown("### Situacao atual")
 
 last = hist.iloc[-1]
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("pH atual",          f"{last['pH']:.2f}",
-          "OK" if PH_MIN <= last["pH"] <= PH_MAX else "Fora da faixa")
-c2.metric("CE atual (mS/cm)",  f"{last['EC']:.2f}",
-          "OK" if EC_MIN <= last["EC"] <= EC_MAX else "Fora da faixa")
-c3.metric("Temperatura (°C)",  f"{last['temperature']:.2f}")
-c4.metric("Umidade (%)",       f"{last['humidity']:.2f}")
+colunas = st.columns(len(features))
+for coluna, feature in zip(colunas, features):
+    rotulo = ROTULO_FEATURE.get(feature, (feature, ""))[0]
+    if feature == "pH":
+        delta = "OK" if PH_MIN <= last["pH"] <= PH_MAX else "Fora da faixa"
+    elif feature == "EC":
+        delta = "OK" if EC_MIN <= last["EC"] <= EC_MAX else "Fora da faixa"
+    else:
+        delta = None
+    coluna.metric(rotulo, f"{last[feature]:.2f}", delta)
+
+st.caption(f"Ultima leitura: {pd.Timestamp(last['timestamp']):%d/%m/%Y %H:%M:%S}")
+
+lacuna = hist.tail(LSTM_WINDOW)["timestamp"].diff().dropna().dt.total_seconds().max() / 60
+intervalo = hist["timestamp"].diff().dropna().dt.total_seconds().median() / 60
+if pd.notna(lacuna) and lacuna > MAX_GAP_FACTOR * max(intervalo, 1e-6):
+    st.warning(
+        f"A janela usada na previsao contem uma interrupcao de "
+        f"{lacuna / 60:.1f} h, bem acima do intervalo tipico de "
+        f"{intervalo:.1f} min entre leituras. A previsao sai, mas tratando "
+        "como consecutivas leituras separadas por essa parada."
+    )
 
 st.markdown("### Previsao proxima observacao")
-next_pH = predict_next(int(id_plant), target="pH")
-next_EC = predict_next(int(id_plant), target="EC")
+next_pH = predict_next(int(id_plant), target="pH", fonte=fonte)
+next_EC = predict_next(int(id_plant), target="EC", fonte=fonte)
 
 pc, ec = st.columns(2)
 if next_pH:
@@ -95,8 +146,8 @@ if next_EC:
         ec.warning(f"Previsao aponta CE fora da faixa ideal ({EC_MIN}-{EC_MAX})")
 
 st.markdown("### Trajetoria prevista")
-traj_pH = predict_trajectory(int(id_plant), target="pH", steps_ahead=steps_ahead)
-traj_EC = predict_trajectory(int(id_plant), target="EC", steps_ahead=steps_ahead)
+traj_pH = predict_trajectory(int(id_plant), target="pH", steps_ahead=steps_ahead, fonte=fonte)
+traj_EC = predict_trajectory(int(id_plant), target="EC", steps_ahead=steps_ahead, fonte=fonte)
 
 hist_tail = hist.tail(LSTM_WINDOW).copy()
 
@@ -131,9 +182,9 @@ if traj_EC is not None:
                     use_container_width=True)
 
 with st.expander("Dados da trajetoria prevista"):
-    if traj_pH is not None:
+    if traj_pH is not None and traj_EC is not None:
         combined = traj_pH.rename(columns={"delta": "delta_pH"}).merge(
-            traj_EC.rename(columns={"delta": "delta_EC", "EC": "EC"}),
+            traj_EC.rename(columns={"delta": "delta_EC"}),
             on="timestamp", how="outer",
         )
         st.dataframe(combined, use_container_width=True)

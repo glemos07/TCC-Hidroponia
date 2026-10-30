@@ -5,10 +5,11 @@ Este loader:
 1. Procura qualquer CSV em `data/kaggle/`
 2. Detecta colunas por sinonimos (case-insensitive)
 3. Aplica limpeza (nulos, duplicatas) conforme Quadro 1 do documento
-4. Mapeia para o esquema do banco (Monitoring, Sensor_Data)
+4. Devolve a serie pronta para ARIMA/LSTM
 
-Se nenhum CSV Kaggle for encontrado, retorna None e o pipeline
-mantem o gerador sintetico como fallback.
+Serve apenas de base de comparacao para o Quadro 6: o dataset e lido do CSV
+e nunca entra no banco, que guarda somente o que os sensores mediram.
+Retorna None quando nao ha CSV em `data/kaggle/`.
 """
 from __future__ import annotations
 

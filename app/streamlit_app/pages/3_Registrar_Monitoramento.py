@@ -18,6 +18,12 @@ sensors = fetch_df("SELECT id, sensor_type FROM sensor ORDER BY id")
 if plants.empty or ambient.empty:
     st.error("Cadastre plantas e ambientes antes de registrar monitoramento.")
     st.stop()
+if sensors.empty:
+    st.error("Catalogo de sensores vazio. Inicialize o banco na tela RF07.")
+    st.stop()
+
+#: Valor inicial sugerido por grandeza; o catalogo e quem define os campos.
+PADRAO = {"pH": 6.0, "EC": 1.8, "Temperatura": 22.0, "Temperatura Ambiente": 24.0}
 
 with st.form("form_mon", clear_on_submit=True):
     dt = st.date_input("Data")
@@ -34,15 +40,24 @@ with st.form("form_mon", clear_on_submit=True):
     )
     id_user = st.selectbox(
         "Responsavel",
-        users["id"],
+        users["id"] if not users.empty else [],
         format_func=lambda i: users.loc[users["id"] == i, "name"].values[0],
+        help="Opcional - cadastre responsaveis para preencher esta lista.",
     )
     st.markdown("**Leituras dos sensores**")
-    c1, c2, c3, c4 = st.columns(4)
-    ph  = c1.number_input("pH", value=6.0, step=0.01, min_value=0.0, max_value=14.0)
-    ec  = c2.number_input("CE (mS/cm)", value=1.8, step=0.01)
-    tmp = c3.number_input("Temperatura (°C)", value=22.0, step=0.1)
-    hum = c4.number_input("Umidade (%)", value=68.0, step=0.1)
+    # um campo por sensor do catalogo: a tela acompanha o hardware
+    leituras: dict[int, float] = {}
+    colunas = st.columns(len(sensors))
+    for coluna, sensor in zip(colunas, sensors.itertuples(index=False)):
+        leituras[int(sensor.id)] = coluna.number_input(
+            f"{sensor.sensor_type}",
+            value=PADRAO.get(sensor.sensor_type, 0.0),
+            step=0.01,
+        )
+    ph = next((v for sid, v in leituras.items()
+               if sensors.loc[sensors["id"] == sid, "sensor_type"].values[0] == "pH"), None)
+    ec = next((v for sid, v in leituras.items()
+               if sensors.loc[sensors["id"] == sid, "sensor_type"].values[0] == "EC"), None)
 
     nut_sel = st.multiselect(
         "Nutrientes presentes",
@@ -58,11 +73,11 @@ if submit:
         cur = conn.execute(
             "INSERT INTO monitoring (dt_register, id_plant, id_ambient, id_user, obs) "
             "VALUES (?, ?, ?, ?, ?)",
-            (dt_reg, int(id_plant), int(id_amb), int(id_user), obs or None),
+            (dt_reg, int(id_plant), int(id_amb),
+             int(id_user) if id_user is not None else None, obs or None),
         )
         mid = cur.lastrowid
-        sensor_values = {1: ph, 2: ec, 3: tmp, 4: hum}
-        for sid, val in sensor_values.items():
+        for sid, val in leituras.items():
             conn.execute(
                 "INSERT INTO sensor_data (id_monitoring, id_sensor, value) VALUES (?, ?, ?)",
                 (mid, sid, float(val)),
@@ -75,9 +90,9 @@ if submit:
     st.success(f"Monitoramento id={mid} registrado com sucesso.")
 
     alertas = []
-    if not (PH_MIN <= ph <= PH_MAX):
+    if ph is not None and not (PH_MIN <= ph <= PH_MAX):
         alertas.append(f"pH {ph} fora da faixa ideal ({PH_MIN}-{PH_MAX}).")
-    if not (EC_MIN <= ec <= EC_MAX):
+    if ec is not None and not (EC_MIN <= ec <= EC_MAX):
         alertas.append(f"CE {ec} fora da faixa ideal ({EC_MIN}-{EC_MAX} mS/cm).")
     for a in alertas:
         st.warning(a)

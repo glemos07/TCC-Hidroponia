@@ -1,9 +1,10 @@
 """
-ETL: aplica o schema no SQLite e carrega o dataset.
+Inicializa o banco: aplica o schema e carrega apenas os catalogos de
+referencia (status de cultivo, tipos de sensor, nutrientes).
 
-Fonte:
-    - Se houver CSV em `data/kaggle/`, usa dado real (com limpeza/mapeamento)
-    - Caso contrario, usa o gerador sintetico reprodutivel
+Nenhuma medicao e gerada aqui. O historico do sistema vem dos sensores,
+pela API do ESP32 (`src.api_ingest`); plantas, ambientes, responsaveis e
+colheitas sao cadastrados pelas telas RF01, RF02 e RF05.
 
 Uso:
     python -m src.seed
@@ -12,59 +13,60 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.database import connect, apply_schema, insert_dataframe
-from src.kaggle_loader import load_kaggle_csv
-from src.synthetic_dataset import generate_all, save_to_csv
+from src.api_ingest import aplicar_schema_api
+from src.config import API_SENSOR_MAP
+from src.database import apply_schema, connect, insert_dataframe
+
+#: Entidades que nascem vazias: so recebem linha de sensor real ou de cadastro.
+TABELAS_TRANSACIONAIS = [
+    "plants", "ambient", "users", "monitoring",
+    "sensor_data", "monitoring_nutrient", "farm",
+]
+
+#: Ciclo de vida de uma planta (dominio do documento, secao 3.2).
+FARM_STATUS = ["Plantada", "Germinacao", "Crescimento", "Producao", "Colhida"]
+
+#: Macro e micronutrientes acompanhados no cultivo.
+NUTRIENTES = [
+    "Nitrogenio (N)", "Fosforo (P)", "Potassio (K)",
+    "Calcio (Ca)", "Magnesio (Mg)", "Enxofre (S)",
+    "Ferro (Fe)", "Manganes (Mn)", "Zinco (Zn)",
+    "Cobre (Cu)", "Boro (B)", "Molibdenio (Mo)",
+]
+
+#: Catalogo de sensores: exatamente as grandezas que o ESP32 publica.
+DESCRICAO_SENSOR = {
+    "pH":                   "Sensor eletroquimico de pH com compensacao de temperatura",
+    "EC":                   "Sensor de condutividade eletrica da solucao nutritiva",
+    "Temperatura":          "Sonda de temperatura da solucao nutritiva (DS18B20)",
+    "Temperatura Ambiente": "Sensor de temperatura do ar da estufa (DHT)",
+}
 
 
-def seed(use_kaggle: bool = True) -> dict[str, int]:
-    apply_schema()
+def tabela_sensores() -> pd.DataFrame:
+    """Catalogo derivado de `config.API_SENSOR_MAP`: uma linha por grandeza medida."""
+    linhas = [
+        {"sensor_type": tipo, "unit": unidade,
+         "description": DESCRICAO_SENSOR.get(tipo, f"Sensor {tipo}")}
+        for tipo, unidade, _feature in API_SENSOR_MAP.values()
+    ]
+    return pd.DataFrame(linhas)
 
-    real_ts = None
-    if use_kaggle:
-        result = load_kaggle_csv()
-        if result is not None:
-            df, rep = result
-            print("Fonte: Kaggle CSV")
-            print("Quadro 1 - Resumo do tratamento dos dados")
-            print("-" * 60)
-            for k, v in rep.as_dict().items():
-                print(f"  {k:25s} {v}")
-            real_ts = df
-        else:
-            print("Nenhum CSV em data/kaggle/ - usando gerador sintetico.")
 
-    tables = generate_all(real_ts=real_ts)
-    save_to_csv(tables)
+def seed() -> dict[str, int]:
+    """
+    Recria o banco vazio e popula os catalogos de referencia.
+    Retorna a contagem de registros por entidade.
+    """
+    apply_schema()          # DROP/CREATE das 10 entidades do Apendice A
+    aplicar_schema_api()    # tabelas de controle da ingestao
 
     counts: dict[str, int] = {}
     with connect() as conn:
-        # dimensões
-        insert_dataframe("farm_status", tables["farm_status"], conn)
-        insert_dataframe("ambient",     tables["ambient"], conn)
-        insert_dataframe("users",       tables["users"], conn)
-        insert_dataframe("sensor",      tables["sensor"], conn)
-        insert_dataframe("nutrient",    tables["nutrient"], conn)
-        insert_dataframe("plants",      tables["plants"], conn)
+        insert_dataframe("farm_status", pd.DataFrame({"status_name": FARM_STATUS}), conn)
+        insert_dataframe("nutrient", pd.DataFrame({"name": NUTRIENTES}), conn)
+        insert_dataframe("sensor", tabela_sensores(), conn)
 
-        # monitoring precisa de FKs válidas; ids são sequenciais
-        insert_dataframe("monitoring", tables["monitoring"], conn)
-
-        # SENSOR_DATA e MONITORING_NUTRIENT usam índice do dataframe -> converte para id (idx+1)
-        sd = tables["sensor_data"].copy()
-        sd["id_monitoring"] = sd.pop("id_monitoring_idx") + 1
-        sd = sd[["id_monitoring", "id_sensor", "value"]]
-        insert_dataframe("sensor_data", sd, conn)
-
-        mn = tables["monitoring_nutrient"].copy()
-        mn["id_monitoring"] = mn.pop("id_monitoring_idx") + 1
-        mn["id_nutrient"] = mn.pop("id_nutrient_idx") + 1
-        mn = mn[["id_monitoring", "id_nutrient"]]
-        insert_dataframe("monitoring_nutrient", mn, conn)
-
-        insert_dataframe("farm", tables["farm"], conn)
-
-        # coletar contagens finais
         for tbl in [
             "farm_status", "plants", "ambient", "users", "sensor",
             "monitoring", "sensor_data", "nutrient", "monitoring_nutrient", "farm",
@@ -75,7 +77,12 @@ def seed(use_kaggle: bool = True) -> dict[str, int]:
 
 if __name__ == "__main__":
     counts = seed()
-    print("\nQuadro 2 - Entidades do modelo relacional e volume de registros")
-    print("-" * 60)
+    print("Banco inicializado - catalogos de referencia carregados")
+    print("-" * 62)
     for tbl, n in counts.items():
-        print(f"  {tbl:22s} {n:>6d} registros")
+        marca = "catalogo" if n else "vazia"
+        print(f"  {tbl:22s} {n:>4d} registros  ({marca})")
+    print(
+        "\nAs medicoes vem dos sensores. Importe com:\n"
+        "    python -m src.api_ingest"
+    )

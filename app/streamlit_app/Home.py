@@ -29,10 +29,16 @@ header(
 st.markdown("""
 Este prototipo integra:
 
+- **Coleta IoT** via API REST (FastAPI): o ESP32 publica a telemetria no servidor
+  e a aplicacao importa as leituras. **Todo o historico do banco vem dos
+  sensores** - nao ha dados gerados artificialmente.
 - **Banco relacional SQLite** com 10 entidades (FARM_STATUS, PLANTS, AMBIENT, USERS,
-  SENSOR, MONITORING, SENSOR_DATA, NUTRIENT, MONITORING_NUTRIENT, FARM).
-- **Modelos preditivos** ARIMA (baseline univariado) e LSTM multivariado (pH, CE,
-  temperatura e umidade).
+  SENSOR, MONITORING, SENSOR_DATA, NUTRIENT, MONITORING_NUTRIENT, FARM). O seed
+  carrega apenas catalogos de referencia; as demais tabelas nascem vazias.
+- **Modelos preditivos** ARIMA (baseline univariado) e LSTM multivariado, treinados
+  sobre a telemetria real do ESP32 (pH, CE, temperatura da solucao, temperatura
+  do ar). O dataset publico do Kaggle fica disponivel so como base de
+  comparacao do Quadro 6, lido do CSV e sem entrar no banco.
 - **Interface Streamlit** cobrindo os 7 requisitos funcionais RF01-RF07.
 
 Use o menu lateral para navegar entre as telas.
@@ -48,7 +54,7 @@ st.table({
         "Consultar historico",
         "Registrar producao",
         "Visualizar indicadores",
-        "Importar dados iniciais",
+        "Inicializar banco (schema + catalogos)",
     ],
     "Tela":     [
         "1_Cadastrar_Planta",
@@ -64,8 +70,10 @@ st.table({
 
 st.markdown("### Telas adicionais")
 st.markdown(
-    "- **8_Previsao_por_Planta** - selecione uma planta cadastrada e veja "
-    "a previsao de pH e CE (LSTM treinado sobre o historico dela).\n"
+    "- **8_Previsao_por_Planta** - selecione uma planta e veja a previsao de "
+    "pH e CE pelo LSTM treinado sobre as leituras dos sensores dela.\n"
     "- **9_Comparativo_Modelos** - Quadro 6 do documento: metricas ARIMA vs LSTM "
-    "sobre o conjunto de teste."
+    "sobre o conjunto de teste.\n"
+    "- **10_Servidor_API** - estado do servidor FastAPI, telemetria que o ESP32 "
+    "esta enviando e importacao dessas leituras para o banco."
 )

@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.config import REPORTS_DIR
+from src.config import ARTIFACT_SUFFIX, REPORTS_DIR
 from src.metrics import rmse, mae, mape, diebold_mariano
 from src import model_arima, model_lstm
 
@@ -27,9 +27,9 @@ def _align(a: list, b: list) -> tuple[list, list]:
     return a[-n:], b[-n:]
 
 
-def evaluate_target(target: str) -> dict:
-    arima_res = model_arima.run(target=target)
-    lstm_res  = model_lstm.run(target=target)
+def evaluate_target(target: str, fonte: str = "kaggle") -> dict:
+    arima_res = model_arima.run(target=target, fonte=fonte)
+    lstm_res  = model_lstm.run(target=target, fonte=fonte)
 
     y_true_a, y_pred_a = arima_res["y_true"], arima_res["y_pred"]
     y_true_l, y_pred_l = lstm_res["y_true"],  lstm_res["y_pred"]
@@ -44,6 +44,7 @@ def evaluate_target(target: str) -> dict:
 
     metrics = {
         "target": target,
+        "fonte": fonte,
         "ARIMA": {
             "RMSE": rmse(y_true, y_a),
             "MAE":  mae(y_true, y_a),
@@ -71,7 +72,7 @@ def evaluate_target(target: str) -> dict:
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig(plot_dir / f"grafico3_{target}.png", dpi=140)
+    plt.savefig(plot_dir / f"grafico3_{target}{ARTIFACT_SUFFIX[fonte]}.png", dpi=140)
     plt.close()
 
     return metrics
@@ -90,27 +91,37 @@ def format_quadro6(all_metrics: list[dict]) -> str:
         lines.append(f"{'Modelo':30s} {'RMSE':>10s} {'MAE':>10s} {'MAPE (%)':>10s}")
         lines.append(f"{'ARIMA (univariado)':30s} {a['RMSE']:>10.4f} {a['MAE']:>10.4f} {a['MAPE']:>10.2f}")
         lines.append(f"{'LSTM (multivariado)':30s} {l['RMSE']:>10.4f} {l['MAE']:>10.4f} {l['MAPE']:>10.2f}")
-        lines.append(f"{'Reducao relativa LSTM vs ARIMA':30s} {red_rmse:>9.1f}% {red_mae:>9.1f}% {red_mape:>9.1f}%")
+        # sinal negativo = LSTM melhor. Rotular como "reducao" so vale quando
+        # o LSTM vence; com o ARIMA na frente o numero fica positivo e o rotulo
+        # antigo se lia ao contrario.
+        lines.append(f"{'Variacao LSTM vs ARIMA (- = LSTM melhor)':40s} "
+                     f"{red_rmse:>+8.1f}% {red_mae:>+8.1f}% {red_mape:>+8.1f}%")
+        vencedor = "LSTM" if l["RMSE"] < a["RMSE"] else "ARIMA"
+        lines.append(f"{'Menor RMSE':40s} {vencedor}")
         dm = m["diebold_mariano"]
         sig = "significativa (rejeita H0)" if dm["p_value"] < 0.05 else "nao significativa"
         lines.append(f"Diebold-Mariano: stat={dm['stat']:.3f}  p-value={dm['p_value']:.4f}  ->  diferenca {sig}")
     return "\n".join(lines)
 
 
-def main():
+def main(fonte: str = "kaggle"):
+    sufixo = ARTIFACT_SUFFIX[fonte]
     results = []
     for tgt in ["pH", "EC"]:
-        results.append(evaluate_target(tgt))
+        results.append(evaluate_target(tgt, fonte=fonte))
 
     report = format_quadro6(results)
     print(report)
 
-    (REPORTS_DIR / "quadro6.txt").write_text(report, encoding="utf-8")
-    with open(REPORTS_DIR / "metrics.json", "w", encoding="utf-8") as f:
+    (REPORTS_DIR / f"quadro6{sufixo}.txt").write_text(report, encoding="utf-8")
+    with open(REPORTS_DIR / f"metrics{sufixo}.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
     print(f"\nArtefatos salvos em: {REPORTS_DIR}")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    # `python -m src.evaluate api` avalia a telemetria real do ESP32
+    main(sys.argv[1] if len(sys.argv) > 1 else "kaggle")
