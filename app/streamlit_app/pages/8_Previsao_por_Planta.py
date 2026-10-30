@@ -19,7 +19,7 @@ from src.config import (
 from src.data_loader import plantas_api
 from src.database import fetch_df
 from src.predict import (
-    load_plant_history, models_available,
+    backtest_recente, load_plant_history, models_available,
     predict_next, predict_trajectory,
 )
 
@@ -86,7 +86,9 @@ with col_r:
         f"Cada passo previsto corresponde a **{FORECAST_HORIZON_STEPS} intervalos** de coleta a frente."
     )
 
-hist = load_plant_history(int(id_plant), fonte=fonte)
+# so a janela do modelo: a tela plota as ultimas LSTM_WINDOW leituras, e
+# varrer o historico inteiro custaria 5x mais a cada interacao
+hist = load_plant_history(int(id_plant), fonte=fonte, janela=LSTM_WINDOW)
 if len(hist) < LSTM_WINDOW:
     st.warning(
         f"Planta possui apenas {len(hist)} leituras completas. "
@@ -144,6 +146,48 @@ if next_EC:
     )
     if not (EC_MIN <= next_EC["predicted"] <= EC_MAX):
         ec.warning(f"Previsao aponta CE fora da faixa ideal ({EC_MIN}-{EC_MAX})")
+
+st.markdown("### Acuracia nos horizontes que ja venceram")
+st.caption(
+    "Para cada instante recente, o modelo foi rodado com a janela que terminava "
+    "um horizonte antes, e o resultado comparado com o que o sensor registrou. "
+    "Mede o acerto sem precisar esperar a previsao atual vencer."
+)
+
+col_bt = st.columns(2)
+for coluna, (alvo, cor) in zip(col_bt, [("pH", "#1f4e79"), ("EC", "#c00000")]):
+    bt = backtest_recente(int(id_plant), target=alvo, fonte=fonte, n_pontos=40)
+    if bt is None or bt.empty:
+        coluna.info(f"{alvo}: historico insuficiente para avaliar.")
+        continue
+
+    mae = bt["erro"].abs().mean()
+    rmse = float((bt["erro"] ** 2).mean() ** 0.5)
+    mae_persistente = bt["erro_persistente"].abs().mean()
+    ganho = (mae_persistente - mae) / mae_persistente * 100 if mae_persistente else 0.0
+
+    coluna.metric(f"{alvo} - MAE do LSTM ({len(bt)} horizontes)", f"{mae:.4f}",
+                  delta=f"{ganho:+.0f}% vs supor que nada muda")
+
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(x=bt["timestamp"], y=bt["real"], name="real",
+                                line=dict(color=cor, width=2)))
+    fig_bt.add_trace(go.Scatter(x=bt["timestamp"], y=bt["previsto"], name="previsto (LSTM)",
+                                line=dict(color=cor, width=2, dash="dash")))
+    fig_bt.add_trace(go.Scatter(x=bt["timestamp"], y=bt["persistente"],
+                                name="persistencia", line=dict(color="#7f7f7f", width=1.5,
+                                                               dash="dot")))
+    fig_bt.update_layout(title=f"{alvo}: previsto x real (RMSE {rmse:.4f})",
+                         xaxis_title="Tempo", yaxis_title=alvo, height=280,
+                         margin=dict(t=40, b=30),
+                         legend=dict(orientation="h", y=1.2))
+    coluna.plotly_chart(fig_bt, use_container_width=True)
+
+    if mae > mae_persistente:
+        coluna.warning(
+            f"Nesta faixa o LSTM de {alvo} erra mais (MAE {mae:.4f}) do que supor "
+            f"que o valor nao muda (MAE {mae_persistente:.4f})."
+        )
 
 st.markdown("### Trajetoria prevista")
 traj_pH = predict_trajectory(int(id_plant), target="pH", steps_ahead=steps_ahead, fonte=fonte)

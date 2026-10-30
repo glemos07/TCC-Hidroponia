@@ -18,7 +18,7 @@ from src.api_client import ApiIndisponivel, ServidorSensores, resumo_simulados
 from src.api_ingest import resumo_ingestao, sincronizar, ultima_leitura_importada
 from src.config import API_BASE_URL, API_ID_FAZENDA
 from src.data_loader import plantas_api as plantas_ingeridas
-from src.predict import models_available, predict_next
+from src.predict import backtest_recente, models_available, predict_next
 
 st.set_page_config(page_title="Servidor de sensores", page_icon="📡", layout="wide")
 
@@ -167,6 +167,16 @@ def painel_ao_vivo(limite: int, sincronizar_tambem: bool, prever_tambem: bool):
     st.caption(f"Atualizado em {datetime.now():%H:%M:%S}")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _backtest(id_plant: int, alvo: str, _marcador: str) -> pd.DataFrame | None:
+    """
+    Previsto x real nos horizontes ja vencidos. `_marcador` e o instante da
+    ultima leitura: so recalcula quando chega dado novo, e nao a cada ciclo
+    da tela.
+    """
+    return backtest_recente(id_plant, alvo, "api", n_pontos=30)
+
+
 def _prever_ao_vivo():
     """Previsao do LSTM sobre o historico ja importado, recalculada a cada ciclo."""
     plantas = plantas_ingeridas()
@@ -179,6 +189,7 @@ def _prever_ao_vivo():
 
     id_plant = int(plantas["id_plant"].iloc[0])
     st.markdown("**Previsao do LSTM sobre as leituras ja importadas**")
+
     cols = st.columns(2)
     for coluna, (alvo, lo, hi) in zip(cols, [("pH", PH_MIN, PH_MAX),
                                              ("EC", EC_MIN, EC_MAX)]):
@@ -186,13 +197,51 @@ def _prever_ao_vivo():
         if r is None:
             coluna.info(f"{alvo}: historico insuficiente para a janela do modelo.")
             continue
+
         coluna.metric(
             f"{alvo} previsto (+{r['horizon_min']:.0f} min)",
             f"{r['predicted']:.3f}",
             delta=f"{r['predicted'] - r['last_value']:+.3f}",
         )
-        if not (lo <= r["predicted"] <= hi):
-            coluna.warning(f"Previsao fora da faixa ideal ({lo}-{hi})")
+
+        # a previsao sozinha nao diz se e confiavel; o erro medido nos
+        # horizontes que ja venceram diz, e sai na hora
+        bt = _backtest(id_plant, alvo, str(r["last_timestamp"]))
+        if bt is None or bt.empty:
+            continue
+        mae = bt["erro"].abs().mean()
+        mae_persistente = bt["erro_persistente"].abs().mean()
+        coluna.caption(
+            f"Nos ultimos {len(bt)} horizontes vencidos: MAE do modelo "
+            f"{mae:.3f} | supondo que nada muda, {mae_persistente:.3f}"
+        )
+        if mae > mae_persistente:
+            coluna.warning(
+                f"Aqui o modelo de {alvo} erra mais do que simplesmente supor que "
+                "o valor nao muda. Nesta faixa de operacao ele nao esta agregando."
+            )
+
+    _grafico_previsto_real(id_plant)
+
+
+def _grafico_previsto_real(id_plant: int):
+    """Sobrepoe previsto e real nos horizontes vencidos - a evidencia visual."""
+    with st.expander("Previsto x real (horizontes ja vencidos)"):
+        for alvo, cor in [("pH", "#1f4e79"), ("EC", "#c00000")]:
+            bt = _backtest(id_plant, alvo, "grafico")
+            if bt is None or bt.empty:
+                continue
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=bt["timestamp"], y=bt["real"],
+                                     name="real", line=dict(color=cor, width=2)))
+            fig.add_trace(go.Scatter(x=bt["timestamp"], y=bt["previsto"],
+                                     name="previsto", line=dict(color=cor, width=2,
+                                                                dash="dash")))
+            fig.update_layout(title=f"{alvo}: previsto x real",
+                              xaxis_title="Tempo", yaxis_title=alvo,
+                              margin=dict(t=40, b=30), height=260,
+                              legend=dict(orientation="h", y=1.18))
+            st.plotly_chart(fig, use_container_width=True)
 
 
 def _desenhar(recentes: pd.DataFrame):

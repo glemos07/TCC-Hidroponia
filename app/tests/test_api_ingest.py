@@ -191,6 +191,79 @@ def test_janelas_que_cruzam_lacuna_sao_descartadas():
     assert len(com_filtro) == len(sem_filtro) - (5 + 3 - 1)
 
 
+def test_janela_limitada_bate_com_o_fim_do_historico(db):
+    """
+    Pedir so as ultimas N leituras tem de devolver exatamente a cauda do
+    historico completo - e a otimizacao que mantem a inferencia constante
+    conforme o banco cresce.
+    """
+    from src.config import features_de
+    from src.data_loader import load_plant_features, plantas_api
+
+    bruto = _bruto(40)
+    bruto["timestamp"] = [f"2026-10-30T08:{i:02d}:00-03:00" for i in range(40)]
+    gravar_lote(normalizar(bruto))
+
+    # a ingestao cria sua propria planta; o fixture ja tinha outra
+    id_plant = int(plantas_api()["id_plant"].iloc[0])
+    feats = features_de("api")
+    completo = load_plant_features(id_plant, feats)
+    cauda = load_plant_features(id_plant, feats, limite=10)
+
+    assert len(completo) == 40
+    assert len(cauda) == 10
+    pd.testing.assert_frame_equal(
+        completo.tail(10).reset_index(drop=True), cauda.reset_index(drop=True)
+    )
+
+
+def test_backtest_alinha_previsto_com_o_real_correto(db, monkeypatch):
+    """
+    O backtest tem de comparar cada previsao com a observacao de exatamente um
+    horizonte depois da janela - um desalinhamento aqui inflaria ou mascararia
+    o erro sem que nada quebrasse.
+    """
+    import numpy as np
+
+    from src import predict as mod
+
+    monkeypatch.setattr(mod, "LSTM_WINDOW", 3)
+    monkeypatch.setattr(mod, "FORECAST_HORIZON_STEPS", 2)
+
+    n = 20
+    bruto = _bruto(n)
+    bruto["timestamp"] = [f"2026-10-30T08:{i:02d}:00-03:00" for i in range(n)]
+    bruto["ph"] = [6.0 + i * 0.01 for i in range(n)]
+    gravar_lote(normalizar(bruto))
+
+    class ModeloFalso:
+        """Devolve sempre delta zero: assim previsto == valor de referencia."""
+        def predict(self, x, verbose=0):
+            return np.zeros((len(x), 1))
+
+    monkeypatch.setattr(mod, "_carregar",
+                        lambda alvo, fonte: (ModeloFalso(), _ScalerIdentidade()))
+
+    from src.data_loader import plantas_api
+    id_plant = int(plantas_api()["id_plant"].iloc[0])
+
+    bt = mod.backtest_recente(id_plant, "pH", "api", n_pontos=5)
+    assert bt is not None and len(bt) == 5
+
+    # com delta zero, previsto = valor da referencia, um horizonte-1 antes do real
+    hist = mod.load_plant_history(id_plant, "api")
+    for linha in bt.itertuples(index=False):
+        idx_real = hist.index[hist["timestamp"] == linha.timestamp][0]
+        esperado = hist["pH"].iloc[idx_real - (2 - 1)]
+        assert linha.previsto == pytest.approx(esperado)
+        assert linha.real == pytest.approx(hist["pH"].iloc[idx_real])
+
+
+class _ScalerIdentidade:
+    def transform(self, x):
+        return x
+
+
 def test_features_da_api_sao_carregaveis(db):
     from src.config import features_de
     from src.data_loader import load_plant_features, plantas_api

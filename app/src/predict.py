@@ -36,12 +36,32 @@ def _lazy_tf():
     return tf
 
 
-def load_plant_history(id_plant: int, fonte: str = "kaggle") -> pd.DataFrame:
+#: Margem sobre a janela pedida ao banco: leituras com algum sensor fora de
+#: faixa somem no dropna, entao buscar exatamente LSTM_WINDOW linhas pode
+#: devolver menos do que o modelo precisa.
+MARGEM_JANELA = 3
+
+
+def load_plant_history(id_plant: int, fonte: str = "kaggle",
+                       janela: int | None = None) -> pd.DataFrame:
     """
     Historico da planta como DataFrame ['timestamp', *features da fonte],
     ordenado cronologicamente.
+
+    `janela` pede so as ultimas N observacoes completas - o suficiente para
+    inferir, sem varrer todo o historico. Se a margem nao bastar, recai para
+    a leitura completa.
     """
-    return load_plant_features(int(id_plant), features_de(fonte))
+    features = features_de(fonte)
+    if janela is None:
+        return load_plant_features(int(id_plant), features)
+
+    hist = load_plant_features(int(id_plant), features, limite=janela * MARGEM_JANELA)
+    if len(hist) < janela:
+        completo = load_plant_features(int(id_plant), features)
+        if len(completo) > len(hist):
+            return completo
+    return hist
 
 
 def _model_paths(target: str, fonte: str = "kaggle") -> tuple[Path, Path]:
@@ -109,7 +129,7 @@ def predict_next(id_plant: int, target: str = "pH", fonte: str = "kaggle") -> di
         return None
 
     features = features_de(fonte)
-    hist = load_plant_history(id_plant, fonte=fonte)
+    hist = load_plant_history(id_plant, fonte=fonte, janela=LSTM_WINDOW)
     if len(hist) < LSTM_WINDOW:
         return None
 
@@ -143,6 +163,68 @@ def predict_next(id_plant: int, target: str = "pH", fonte: str = "kaggle") -> di
     }
 
 
+def backtest_recente(id_plant: int, target: str = "pH", fonte: str = "api",
+                     n_pontos: int = 30) -> pd.DataFrame | None:
+    """
+    Confronta previsao com realidade nos ultimos `n_pontos` horizontes que ja
+    venceram: para cada instante, roda o modelo com a janela que terminava um
+    horizonte antes e compara com o valor que o sensor de fato registrou.
+
+    Serve para mostrar a acuracia ao vivo sem esperar o horizonte correr - com
+    96 min a frente, aguardar a previsao vencer nao cabe numa apresentacao.
+
+    Todas as janelas vao ao modelo num unico `predict` em lote; chamar uma por
+    vez custaria ~130 ms cada.
+    """
+    model, scaler = _carregar(target, fonte)
+    if model is None:
+        return None
+
+    features = features_de(fonte)
+    horizonte = FORECAST_HORIZON_STEPS
+    necessario = LSTM_WINDOW + horizonte + n_pontos
+    hist = load_plant_history(id_plant, fonte=fonte, janela=necessario)
+    if len(hist) < necessario:
+        return None
+
+    valores = hist[features].values
+    escalado = scaler.transform(valores)
+    alvo = hist[target].values
+    n = len(hist)
+
+    janelas, refs, reais, instantes = [], [], [], []
+    for k in range(n_pontos):
+        idx_real = n - n_pontos + k
+        fim_janela = idx_real - (horizonte - 1)
+        inicio = fim_janela - LSTM_WINDOW + 1
+        if inicio < 0:
+            continue
+        janelas.append(escalado[inicio: fim_janela + 1])
+        refs.append(alvo[fim_janela])
+        reais.append(alvo[idx_real])
+        instantes.append(hist["timestamp"].iloc[idx_real])
+
+    if not janelas:
+        return None
+
+    deltas = model.predict(np.stack(janelas), verbose=0).flatten()
+    referencia = np.asarray(refs)
+    previsto = referencia + deltas
+    real = np.asarray(reais)
+
+    # Baseline de persistencia: supor que o valor nao muda no horizonte. E o
+    # que um ARIMA(p,1,q) faz em serie muito autocorrelacionada, e o piso que
+    # o LSTM precisa superar para estar agregando alguma coisa.
+    return pd.DataFrame({
+        "timestamp":   instantes,
+        "previsto":    previsto,
+        "real":        real,
+        "erro":        previsto - real,
+        "persistente": referencia,
+        "erro_persistente": referencia - real,
+    })
+
+
 def predict_trajectory(id_plant: int, target: str = "pH",
                        steps_ahead: int = 12, fonte: str = "kaggle") -> pd.DataFrame | None:
     """
@@ -155,7 +237,7 @@ def predict_trajectory(id_plant: int, target: str = "pH",
         return None
 
     features = features_de(fonte)
-    hist = load_plant_history(id_plant, fonte=fonte)
+    hist = load_plant_history(id_plant, fonte=fonte, janela=LSTM_WINDOW)
     if len(hist) < LSTM_WINDOW:
         return None
 

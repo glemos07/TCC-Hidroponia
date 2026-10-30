@@ -92,23 +92,43 @@ def load_timeseries_api(id_plant: int | None = None) -> pd.DataFrame:
     return load_plant_features(int(id_plant), features)
 
 
-def load_plant_features(id_plant: int, features: list[str]) -> pd.DataFrame:
+def load_plant_features(id_plant: int, features: list[str],
+                        limite: int | None = None) -> pd.DataFrame:
     """
     Historico de uma planta em formato largo: uma coluna por feature.
     Compartilhado entre o treino (api) e a inferencia (src.predict).
+
+    `limite` restringe aos N monitoramentos mais recentes. A inferencia so
+    precisa da ultima janela, e carregar o historico inteiro para usar 240
+    linhas custa caro e piora a cada dia de coleta.
     """
-    sql = """
-    SELECT m.dt_register AS timestamp,
-           s.sensor_type AS sensor_type,
-           sd.value      AS value
-    FROM   monitoring m
-    JOIN   sensor_data sd ON sd.id_monitoring = m.id
-    JOIN   sensor s       ON s.id = sd.id_sensor
-    WHERE  m.id_plant = ?
-    ORDER  BY m.dt_register
-    """
+    if limite:
+        sql = """
+        SELECT m.dt_register AS timestamp,
+               s.sensor_type AS sensor_type,
+               sd.value      AS value
+        FROM  (SELECT id, dt_register FROM monitoring
+               WHERE id_plant = ? ORDER BY dt_register DESC, id DESC LIMIT ?) m
+        JOIN   sensor_data sd ON sd.id_monitoring = m.id
+        JOIN   sensor s       ON s.id = sd.id_sensor
+        ORDER  BY m.dt_register
+        """
+        params: tuple = (int(id_plant), int(limite))
+    else:
+        sql = """
+        SELECT m.dt_register AS timestamp,
+               s.sensor_type AS sensor_type,
+               sd.value      AS value
+        FROM   monitoring m
+        JOIN   sensor_data sd ON sd.id_monitoring = m.id
+        JOIN   sensor s       ON s.id = sd.id_sensor
+        WHERE  m.id_plant = ?
+        ORDER  BY m.dt_register
+        """
+        params = (int(id_plant),)
+
     with connect() as conn:
-        df = pd.read_sql_query(sql, conn, params=(int(id_plant),))
+        df = pd.read_sql_query(sql, conn, params=params)
 
     if df.empty:
         return pd.DataFrame(columns=["timestamp"] + features)
