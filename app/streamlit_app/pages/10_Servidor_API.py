@@ -123,12 +123,15 @@ st.markdown("### Telemetria recente")
 
 col_n, col_vivo, col_sync, col_prev = st.columns([2, 1, 1, 1])
 n_linhas = col_n.slider("Leituras exibidas", 20, 1000, 200, step=20)
+# Ligados por padrao: ao abrir, o app ja recuperou o atraso (app_utils), e a
+# partir daqui a ideia e nao ficar para tras de novo enquanto a tela estiver
+# aberta. Importar custa ~0,2 s por ciclo.
 ao_vivo = col_vivo.toggle(
-    "Ao vivo", value=False,
+    "Ao vivo", value=True,
     help="Atualiza a tela sozinha. O ESP32 publica a cada 90 s.",
 )
 auto_sync = col_sync.toggle(
-    "Importar sozinho", value=False,
+    "Importar sozinho", value=True,
     help="A cada atualizacao, grava no banco as leituras novas (~0,2 s).",
 )
 prever = col_prev.toggle(
