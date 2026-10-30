@@ -266,6 +266,39 @@ class _ScalerIdentidade:
         return x
 
 
+def test_snapshot_reconstroi_o_banco_sem_rede(db, tmp_path):
+    """
+    O banco nao e versionado; o CSV de leituras e. Exportar e reimportar tem
+    de devolver exatamente o mesmo conteudo, senao a copia de seguranca nao
+    serve para nada.
+    """
+    from src.api_client import TZ_BR
+    from src.api_ingest import carregar_snapshot
+
+    lote = normalizar(_bruto(5))
+    gravar_lote(lote)
+    with connect() as conn:
+        antes = (conn.execute("SELECT COUNT(*) FROM monitoring").fetchone()[0],
+                 conn.execute("SELECT COUNT(*) FROM sensor_data").fetchone()[0])
+
+    # grava como a exportacao faz: fuso explicito, igual ao que a API devolve
+    arquivo = tmp_path / "leituras.csv"
+    saida = lote.copy()
+    saida["timestamp"] = (saida["timestamp"].dt.tz_localize(TZ_BR)
+                          .dt.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    saida.to_csv(arquivo, index=False, encoding="utf-8")
+
+    relido = carregar_snapshot(arquivo)
+    pd.testing.assert_series_equal(relido["timestamp"], lote["timestamp"])
+
+    # reimportar sobre o banco cheio nao duplica
+    assert gravar_lote(relido).novas == 0
+    with connect() as conn:
+        depois = (conn.execute("SELECT COUNT(*) FROM monitoring").fetchone()[0],
+                  conn.execute("SELECT COUNT(*) FROM sensor_data").fetchone()[0])
+    assert antes == depois
+
+
 def test_features_da_api_sao_carregaveis(db):
     from src.config import features_de
     from src.data_loader import load_plant_features, plantas_api

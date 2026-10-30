@@ -33,7 +33,8 @@ app/
 │   └── pages/                  # RF01–RF07 + previsão
 ├── tests/                      # CT01–CT06
 ├── data/kaggle/                # dataset público (comparação; fora do banco)
-├── db/hidroponia.sqlite3       # banco: catálogos + leituras dos sensores
+├── data/sensores/leituras.csv  # histórico bruto versionado (reconstrói o banco)
+├── db/hidroponia.sqlite3       # banco local, NÃO versionado
 ├── models/artifacts/           # modelos treinados
 └── reports/                    # métricas + gráficos
 ```
@@ -130,13 +131,36 @@ python -m src.api_ingest --fazenda fazenda-01   # restringe a uma fazenda
 python -m src.api_ingest --completo             # relê todo o histórico
 ```
 
+Ao abrir qualquer tela, o app traz sozinho o que o servidor acumulou enquanto
+ele esteve fechado — o ESP32 não para de publicar, mas o app não fica rodando o
+tempo todo. Sem rede, a sessão segue com o que já está no banco e a barra
+lateral avisa.
+
 A ingestão é **idempotente**: a tabela `api_leitura` guarda o id remoto de cada
 leitura já importada, então sincronizar duas vezes não duplica monitoramentos.
 Uma leitura é reconhecida pelo id remoto **ou** pelo par (planta, instante) —
 builds antigas do servidor, sem a restrição `UNIQUE` de hoje, aceitaram a mesma
 leitura duas vezes com ids diferentes.
 
-### 4.4 Modo ao vivo (apresentação)
+### 4.4 Cópia de segurança e reconstrução sem rede
+
+O banco **não é versionado** — são 2,2 MB de binário que mudam a cada
+sincronização e que o git não sabe mesclar. Quem versiona o histórico é
+`data/sensores/leituras.csv`, que é texto e de onde o banco inteiro é
+reconstruído:
+
+```powershell
+python -m src.api_ingest --exportar     # atualiza o CSV a partir do servidor
+python -m src.seed                      # recria o banco vazio
+python -m src.api_ingest --arquivo      # reimporta tudo, sem tocar na rede
+```
+
+Vale como seguro para o dia da apresentação: se o servidor estiver fora ou a
+rede do local falhar, o histórico completo é remontado a partir do repositório.
+Verificado comparando o banco reconstruído com o que veio do servidor — mesmo
+número de monitoramentos, de medidas e mesma média de pH até a oitava casa.
+
+### 4.5 Modo ao vivo (apresentação)
 
 A tela **10_Servidor_API** tem três interruptores no bloco *Telemetria recente*:
 
@@ -160,7 +184,7 @@ Limites honestos para a banca:
 - O modelo carregado fica em cache no processo (`src/predict.py`); sem isso
   cada ciclo pagaria ~8 s para reler o `.keras` do disco.
 
-### 4.5 Tratamento aplicado na entrada (Quadro 1)
+### 4.6 Tratamento aplicado na entrada (Quadro 1)
 
 As mesmas regras de qualidade usadas no dataset Kaggle valem para a telemetria:
 
@@ -205,7 +229,9 @@ Gera:
 - `reports/grafico3_pH.png` e `reports/grafico3_EC.png` — Gráfico 3
 
 Com `api`, os arquivos recebem o sufixo `_api` (`quadro6_api.txt`,
-`lstm_pH_api.keras`, …) e nada do Quadro 6 original é sobrescrito. A tela 8 usa
+`lstm_pH_api.keras`, …) e nada do Quadro 6 original é sobrescrito. Os modelos
+treinados e os relatórios **são versionados**, então quem clonar já abre as
+telas de previsão sem precisar retreinar. A tela 8 usa
 sempre os modelos `api`: previsão por planta lê o histórico do banco, que só
 tem sensores. A comparação sobre o dataset público fica na tela 9.
 O LSTM exige pelo menos `2 × (janela + horizonte)` leituras da planta —

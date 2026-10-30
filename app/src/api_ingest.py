@@ -22,20 +22,24 @@ Uso:
     python -m src.api_ingest                       # sincroniza tudo
     python -m src.api_ingest --fazenda fazenda-01  # so uma fazenda
     python -m src.api_ingest --completo            # ignora o marcador e rele tudo
+    python -m src.api_ingest --exportar            # salva o historico num CSV versionavel
+    python -m src.api_ingest --arquivo             # reconstroi o banco do CSV, sem rede
 """
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
-from src.api_client import ServidorSensores
+from src.api_client import TZ_BR as TZ_SNAPSHOT, ServidorSensores
 from src.config import (
     API_FAIXAS_VALIDAS,
     API_ID_FAZENDA,
     API_SENSOR_MAP,
+    DATA_DIR,
     SCHEMA_API_SQL,
 )
 from src.database import connect
@@ -247,6 +251,50 @@ def sincronizar(api: ServidorSensores | None = None, id_fazenda: str | None = No
     return gravar_lote(lote)
 
 
+#: Instantaneo versionado do historico bruto, para reconstruir o banco sem rede.
+ARQUIVO_SNAPSHOT = DATA_DIR / "sensores" / "leituras.csv"
+
+
+def exportar_snapshot(api: ServidorSensores | None = None,
+                      destino: Path | None = None,
+                      id_fazenda: str | None = None) -> tuple[Path, int]:
+    """
+    Baixa o historico completo e grava em CSV versionavel.
+
+    O banco SQLite nao vai para o repositorio (binario, muda a cada
+    sincronizacao e nao da merge entre duas pessoas). Este CSV cumpre o papel
+    de copia de seguranca: e texto, versiona bem e permite reconstruir o banco
+    inteiro sem depender do servidor estar no ar.
+    """
+    api = api or ServidorSensores()
+    destino = destino or ARQUIVO_SNAPSHOT
+    fazenda = id_fazenda if id_fazenda is not None else (API_ID_FAZENDA or None)
+
+    lote = api.baixar_tudo(id_fazenda=fazenda)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+
+    # grava com o fuso explicito, do mesmo jeito que a API devolve, para que
+    # reler o arquivo passe pela mesma normalizacao e de o mesmo resultado
+    saida = lote.copy()
+    saida["timestamp"] = (saida["timestamp"].dt.tz_localize(TZ_SNAPSHOT)
+                          .dt.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    saida.to_csv(destino, index=False, encoding="utf-8")
+    return destino, len(saida)
+
+
+def carregar_snapshot(origem: Path | None = None) -> pd.DataFrame:
+    """Le o instantaneo em CSV e devolve o lote normalizado, pronto para gravar."""
+    from src.api_client import normalizar
+
+    origem = origem or ARQUIVO_SNAPSHOT
+    if not origem.exists():
+        raise FileNotFoundError(
+            f"Instantaneo nao encontrado em {origem}. Gere com:\n"
+            "    python -m src.api_ingest --exportar"
+        )
+    return normalizar(pd.read_csv(origem))
+
+
 def gravar_lote(lote: pd.DataFrame) -> RelatorioSync:
     """
     Persiste um lote ja normalizado (saida de `api_client.normalizar`).
@@ -399,7 +447,29 @@ def main() -> None:
     p.add_argument("--planta", default=None, help="Filtrar por id_planta")
     p.add_argument("--completo", action="store_true",
                    help="Ignora o marcador incremental e rele todo o historico")
+    p.add_argument("--exportar", nargs="?", const="", metavar="CSV",
+                   help="Baixa o historico completo para um CSV versionavel e sai")
+    p.add_argument("--arquivo", nargs="?", const="", metavar="CSV",
+                   help="Importa de um CSV local em vez da API (funciona sem rede)")
     args = p.parse_args()
+
+    if args.exportar is not None:
+        api = ServidorSensores(base_url=args.url)
+        destino, n = exportar_snapshot(
+            api, Path(args.exportar) if args.exportar else None, args.fazenda)
+        print(f"{n} leituras gravadas em {destino}")
+        return
+
+    if args.arquivo is not None:
+        origem = Path(args.arquivo) if args.arquivo else None
+        lote = carregar_snapshot(origem)
+        print(f"Lendo {len(lote)} leituras de {origem or ARQUIVO_SNAPSHOT}")
+        rel = gravar_lote(lote)
+        print("\nImportacao concluida")
+        print("-" * 60)
+        for chave, valor in rel.as_dict().items():
+            print(f"  {chave:24s} {valor}")
+        return
 
     api = ServidorSensores(base_url=args.url)
     print(f"API: {api.base_url}")

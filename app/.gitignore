@@ -2,9 +2,22 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
-models/artifacts/*
-reports/*
-!reports/.gitkeep
-!models/artifacts/.gitkeep
-!data/.gitkeep
 
+# O banco NAO e versionado: sao 2,2 MB de binario que mudam a cada
+# sincronizacao e que o git nao sabe mesclar - duas pessoas sincronizando
+# gerariam conflito a cada pull.
+#
+# O historico bruto fica versionado em texto, em data/sensores/leituras.csv,
+# de onde o banco inteiro e reconstruido sem depender da rede:
+#
+#     python -m src.seed
+#     python -m src.api_ingest --arquivo
+#
+db/*.sqlite3
+db/*.sqlite3-wal
+db/*.sqlite3-shm
+
+# Modelos treinados e relatorios SAO versionados: assim quem clona ja abre as
+# telas de previsao e o Quadro 6 sem precisar retreinar (o treino da fonte
+# "api" leva alguns minutos e exige o banco populado).
+!data/.gitkeep
