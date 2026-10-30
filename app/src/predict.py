@@ -238,44 +238,8 @@ def backtest_recente(id_plant: int, target: str = "pH", fonte: str = "api",
     })
 
 
-def predict_trajectory(id_plant: int, target: str = "pH",
-                       steps_ahead: int = 12, fonte: str = "kaggle") -> pd.DataFrame | None:
-    """
-    Previsao recursiva: preve N horizontes rolando a janela.
-    Cada previsao ocupa o slot correspondente da variavel alvo na janela.
-    As demais variaveis (nao-alvo) sao mantidas com o ultimo valor observado.
-    """
-    model, scaler = _carregar(target, fonte)
-    if model is None:
-        return None
-
-    features = features_de(fonte)
-    passos = passos_janela(fonte)
-    hist = load_plant_history(id_plant, fonte=fonte, janela=passos)
-    if len(hist) < passos:
-        return None
-
-    target_idx = features.index(target)
-    window = hist.iloc[-passos:][features].values.copy()
-    window_scaled = scaler.transform(window)
-
-    current_value = float(hist[target].iloc[-1])
-    last_ts = pd.to_datetime(hist["timestamp"].iloc[-1])
-
-    predictions = []
-    for k in range(1, steps_ahead + 1):
-        delta = float(model.predict(window_scaled[np.newaxis, ...], verbose=0).flatten()[0])
-        y_hat = current_value + delta
-        future_ts = last_ts + pd.Timedelta(
-            minutes=intervalo_amostragem(fonte) * passos_horizonte(fonte) * k)
-        predictions.append({"timestamp": future_ts, target: y_hat, "delta": delta})
-
-        # atualiza janela: descarta o primeiro e insere novo passo com y_hat
-        new_row_raw = window[-1].copy()
-        new_row_raw[target_idx] = y_hat
-        new_row_scaled = scaler.transform(new_row_raw[np.newaxis, :]).flatten()
-        window = np.vstack([window[1:], new_row_raw])
-        window_scaled = np.vstack([window_scaled[1:], new_row_scaled])
-        current_value = y_hat
-
-    return pd.DataFrame(predictions)
+# `predict_trajectory` (previsao recursiva de N horizontes) foi removida.
+# Ela realimentava a propria saida na janela, e com o horizonte de 24 h cada
+# passo avancava um dia inteiro: o vies de +0,14 por passo se acumulava ate
+# projetar pH 8,87 em 12 dias, fisicamente impossivel em hidroponia. Para
+# varios horizontes, treine um modelo por horizonte em vez de realimentar.
