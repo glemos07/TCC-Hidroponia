@@ -19,13 +19,15 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
+    API_RESAMPLE_MIN,
     ARTIFACT_SUFFIX,
-    FORECAST_HORIZON_STEPS,
-    LSTM_WINDOW,
     MODELS_DIR,
     features_de,
+    intervalo_amostragem,
+    passos_horizonte,
+    passos_janela,
 )
-from src.data_loader import load_plant_features
+from src.data_loader import load_plant_features, reamostrar
 
 #: Vetor de entrada da fonte padrao (mantido por compatibilidade).
 FEATURES = features_de("kaggle")
@@ -37,28 +39,37 @@ def _lazy_tf():
 
 
 #: Margem sobre a janela pedida ao banco: leituras com algum sensor fora de
-#: faixa somem no dropna, entao buscar exatamente LSTM_WINDOW linhas pode
-#: devolver menos do que o modelo precisa.
+#: faixa somem no dropna, entao buscar exatamente a janela pode devolver
+#: menos pontos do que o modelo precisa.
 MARGEM_JANELA = 3
 
 
 def load_plant_history(id_plant: int, fonte: str = "kaggle",
                        janela: int | None = None) -> pd.DataFrame:
     """
-    Historico da planta como DataFrame ['timestamp', *features da fonte],
-    ordenado cronologicamente.
+    Historico da planta na MESMA grade usada no treino da fonte.
 
-    `janela` pede so as ultimas N observacoes completas - o suficiente para
-    inferir, sem varrer todo o historico. Se a margem nao bastar, recai para
-    a leitura completa.
+    `janela` pede so os ultimos N pontos da grade - o suficiente para inferir,
+    sem varrer todo o historico. O limite e convertido para linhas cruas
+    levando em conta a reamostragem; se nao bastar, recai para a leitura
+    completa.
     """
     features = features_de(fonte)
-    if janela is None:
-        return load_plant_features(int(id_plant), features)
+    minutos = API_RESAMPLE_MIN if fonte == "api" else None
 
-    hist = load_plant_features(int(id_plant), features, limite=janela * MARGEM_JANELA)
+    if janela is None:
+        bruto = load_plant_features(int(id_plant), features)
+        return reamostrar(bruto, minutos, features) if minutos else bruto
+
+    # cada ponto da grade consome ~(minutos / cadencia do sensor) linhas cruas
+    por_ponto = max(1, round(minutos / 1.6)) if minutos else 1
+    limite = janela * por_ponto * MARGEM_JANELA
+    bruto = load_plant_features(int(id_plant), features, limite=limite)
+    hist = reamostrar(bruto, minutos, features) if minutos else bruto
+
     if len(hist) < janela:
         completo = load_plant_features(int(id_plant), features)
+        completo = reamostrar(completo, minutos, features) if minutos else completo
         if len(completo) > len(hist):
             return completo
     return hist
@@ -120,8 +131,8 @@ def _maior_lacuna(janela: pd.DataFrame) -> float:
 
 def predict_next(id_plant: int, target: str = "pH", fonte: str = "kaggle") -> dict | None:
     """
-    Faz previsao de UM ponto (horizonte = FORECAST_HORIZON_STEPS a frente)
-    usando as ultimas LSTM_WINDOW leituras da planta.
+    Faz previsao de UM ponto (um horizonte a frente) usando a ultima janela
+    de contexto da planta, ambos definidos em minutos na config.
     Retorna dict com timestamp previsto, valor previsto e ultimo observado.
     """
     model, scaler = _carregar(target, fonte)
@@ -129,11 +140,12 @@ def predict_next(id_plant: int, target: str = "pH", fonte: str = "kaggle") -> di
         return None
 
     features = features_de(fonte)
-    hist = load_plant_history(id_plant, fonte=fonte, janela=LSTM_WINDOW)
-    if len(hist) < LSTM_WINDOW:
+    janela = passos_janela(fonte)
+    hist = load_plant_history(id_plant, fonte=fonte, janela=janela)
+    if len(hist) < janela:
         return None
 
-    window = hist.iloc[-LSTM_WINDOW:][features].values
+    window = hist.iloc[-janela:][features].values
     window_scaled = scaler.transform(window)
     last_value = float(hist[target].iloc[-1])
     last_ts = pd.to_datetime(hist["timestamp"].iloc[-1])
@@ -142,7 +154,7 @@ def predict_next(id_plant: int, target: str = "pH", fonte: str = "kaggle") -> di
     y_pred = last_value + delta_pred
 
     intervalo = _intervalo_min(hist)
-    horizon_min = intervalo * FORECAST_HORIZON_STEPS
+    horizon_min = intervalo_amostragem(fonte) * passos_horizonte(fonte)
     future_ts = last_ts + pd.Timedelta(minutes=horizon_min)
 
     return {
@@ -158,7 +170,7 @@ def predict_next(id_plant: int, target: str = "pH", fonte: str = "kaggle") -> di
         # maior interrupcao dentro da janela usada: se for muito maior que o
         # intervalo tipico, a janela cruza uma parada da coleta e a previsao
         # merece ressalva na tela
-        "maior_lacuna_min": _maior_lacuna(hist.iloc[-LSTM_WINDOW:]),
+        "maior_lacuna_min": _maior_lacuna(hist.iloc[-janela:]),
         "intervalo_min":    float(intervalo),
     }
 
@@ -170,8 +182,8 @@ def backtest_recente(id_plant: int, target: str = "pH", fonte: str = "api",
     venceram: para cada instante, roda o modelo com a janela que terminava um
     horizonte antes e compara com o valor que o sensor de fato registrou.
 
-    Serve para mostrar a acuracia ao vivo sem esperar o horizonte correr - com
-    96 min a frente, aguardar a previsao vencer nao cabe numa apresentacao.
+    Serve para mostrar a acuracia ao vivo sem esperar o horizonte correr -
+    aguardar a previsao atual vencer nao cabe numa apresentacao.
 
     Todas as janelas vao ao modelo num unico `predict` em lote; chamar uma por
     vez custaria ~130 ms cada.
@@ -181,8 +193,9 @@ def backtest_recente(id_plant: int, target: str = "pH", fonte: str = "api",
         return None
 
     features = features_de(fonte)
-    horizonte = FORECAST_HORIZON_STEPS
-    necessario = LSTM_WINDOW + horizonte + n_pontos
+    horizonte = passos_horizonte(fonte)
+    janela = passos_janela(fonte)
+    necessario = janela + horizonte + n_pontos
     hist = load_plant_history(id_plant, fonte=fonte, janela=necessario)
     if len(hist) < necessario:
         return None
@@ -196,7 +209,7 @@ def backtest_recente(id_plant: int, target: str = "pH", fonte: str = "api",
     for k in range(n_pontos):
         idx_real = n - n_pontos + k
         fim_janela = idx_real - (horizonte - 1)
-        inicio = fim_janela - LSTM_WINDOW + 1
+        inicio = fim_janela - janela + 1
         if inicio < 0:
             continue
         janelas.append(escalado[inicio: fim_janela + 1])
@@ -237,23 +250,24 @@ def predict_trajectory(id_plant: int, target: str = "pH",
         return None
 
     features = features_de(fonte)
-    hist = load_plant_history(id_plant, fonte=fonte, janela=LSTM_WINDOW)
-    if len(hist) < LSTM_WINDOW:
+    passos = passos_janela(fonte)
+    hist = load_plant_history(id_plant, fonte=fonte, janela=passos)
+    if len(hist) < passos:
         return None
 
     target_idx = features.index(target)
-    window = hist.iloc[-LSTM_WINDOW:][features].values.copy()
+    window = hist.iloc[-passos:][features].values.copy()
     window_scaled = scaler.transform(window)
 
     current_value = float(hist[target].iloc[-1])
-    dt = _intervalo_min(hist)
     last_ts = pd.to_datetime(hist["timestamp"].iloc[-1])
 
     predictions = []
     for k in range(1, steps_ahead + 1):
         delta = float(model.predict(window_scaled[np.newaxis, ...], verbose=0).flatten()[0])
         y_hat = current_value + delta
-        future_ts = last_ts + pd.Timedelta(minutes=dt * FORECAST_HORIZON_STEPS * k)
+        future_ts = last_ts + pd.Timedelta(
+            minutes=intervalo_amostragem(fonte) * passos_horizonte(fonte) * k)
         predictions.append({"timestamp": future_ts, target: y_hat, "delta": delta})
 
         # atualiza janela: descarta o primeiro e insere novo passo com y_hat

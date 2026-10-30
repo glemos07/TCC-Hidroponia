@@ -14,7 +14,7 @@ import joblib
 import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
 
-from src.config import ARTIFACT_SUFFIX, FORECAST_HORIZON_STEPS, MODELS_DIR
+from src.config import ARTIFACT_SUFFIX, MODELS_DIR, passos_horizonte
 from src.data_loader import load_timeseries, train_test_split_series
 
 warnings.filterwarnings("ignore")
@@ -26,7 +26,7 @@ def fit_arima(series: np.ndarray, order: tuple[int, int, int] = (2, 1, 2)):
 
 
 def multistep_forecast(train: np.ndarray, test: np.ndarray, order=(2, 1, 2),
-                       horizon: int = FORECAST_HORIZON_STEPS) -> tuple[np.ndarray, np.ndarray]:
+                       horizon: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """
     Para cada ponto t do teste, forecast(h) usando dados até t-h.
     Retorna (y_true, y_pred) alinhados.
@@ -47,22 +47,23 @@ def multistep_forecast(train: np.ndarray, test: np.ndarray, order=(2, 1, 2),
 
 def run(target: str = "pH", order=(2, 1, 2), fonte: str = "kaggle") -> dict:
     """Baseline univariado sobre a fonte indicada ("kaggle" ou "api")."""
+    horizonte = passos_horizonte(fonte)
     df = load_timeseries(fonte=fonte)
-    if len(df) < FORECAST_HORIZON_STEPS * 3:
+    if len(df) < horizonte * 3:
         raise ValueError(
-            f"Serie da fonte '{fonte}' tem apenas {len(df)} leituras; "
-            f"o ARIMA precisa de pelo menos {FORECAST_HORIZON_STEPS * 3}."
+            f"Serie da fonte '{fonte}' tem apenas {len(df)} pontos; "
+            f"o ARIMA precisa de pelo menos {horizonte * 3}."
         )
     train_df, test_df = train_test_split_series(df, test_frac=0.20)
     train, test = train_df[target].values, test_df[target].values
 
-    y_true, y_pred = multistep_forecast(train, test, order=order)
+    y_true, y_pred = multistep_forecast(train, test, order=order, horizon=horizonte)
 
     out = {
         "target":      target,
         "fonte":       fonte,
         "order":       order,
-        "horizon":     FORECAST_HORIZON_STEPS,
+        "horizon":     horizonte,
         "train_size":  len(train),
         "test_size":   len(y_true),
         "y_true":      y_true.tolist(),

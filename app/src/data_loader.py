@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.config import SENSOR_TO_FEATURE, features_de
+from src.config import API_RESAMPLE_MIN, SENSOR_TO_FEATURE, features_de
 from src.database import connect
 
 
@@ -75,9 +75,27 @@ def plantas_api() -> pd.DataFrame:
         )
 
 
-def load_timeseries_api(id_plant: int | None = None) -> pd.DataFrame:
+def reamostrar(df: pd.DataFrame, minutos: int, features: list[str]) -> pd.DataFrame:
     """
-    Serie da telemetria real ingerida da API.
+    Coloca a serie numa grade regular de `minutos`, pela media de cada bin.
+
+    Os sensores publicam a ~1,6 min com jitter; sem a grade regular, "N passos
+    a frente" nao corresponde a um tempo fixo. Bins sem leitura somem (viram
+    lacuna), e o filtro de lacunas do treino cuida deles.
+    """
+    if df.empty or not minutos:
+        return df
+    grade = (df.set_index("timestamp")[features]
+               .resample(f"{minutos}min").mean()
+               .dropna()
+               .reset_index())
+    return grade
+
+
+def load_timeseries_api(id_plant: int | None = None,
+                        reamostragem: int | None = None) -> pd.DataFrame:
+    """
+    Serie da telemetria real ingerida da API, ja na grade regular da fonte.
 
     Sem `id_plant`, usa a planta com mais leituras - treinar um unico modelo
     concatenando plantas diferentes criaria saltos artificiais na serie.
@@ -89,7 +107,9 @@ def load_timeseries_api(id_plant: int | None = None) -> pd.DataFrame:
             return pd.DataFrame(columns=["timestamp"] + features)
         id_plant = int(plantas["id_plant"].iloc[0])
 
-    return load_plant_features(int(id_plant), features)
+    bruto = load_plant_features(int(id_plant), features)
+    minutos = API_RESAMPLE_MIN if reamostragem is None else reamostragem
+    return reamostrar(bruto, minutos, features)
 
 
 def load_plant_features(id_plant: int, features: list[str],

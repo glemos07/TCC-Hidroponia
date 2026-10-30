@@ -20,12 +20,13 @@ from sklearn.preprocessing import StandardScaler
 
 from src.config import (
     ARTIFACT_SUFFIX,
-    FORECAST_HORIZON_STEPS,
-    LSTM_WINDOW,
     MAX_GAP_FACTOR,
     MODELS_DIR,
     RANDOM_SEED,
     features_de,
+    intervalo_amostragem,
+    passos_horizonte,
+    passos_janela,
 )
 from src.data_loader import load_timeseries, train_test_split_series
 
@@ -44,7 +45,7 @@ def _lazy_tf():
 
 def build_supervised_delta(values: np.ndarray, target_raw: np.ndarray,
                            window: int, target_idx: int,
-                           horizon: int = FORECAST_HORIZON_STEPS,
+                           horizon: int = 1,
                            timestamps: np.ndarray | None = None,
                            max_gap_min: float | None = None):
     """
@@ -109,14 +110,16 @@ def run(target: str = "pH", epochs: int = 200, batch_size: int = 64,
     tf = _lazy_tf()
     features = features_de(fonte)
     sufixo = ARTIFACT_SUFFIX[fonte]
+    janela = passos_janela(fonte)
+    horizonte = passos_horizonte(fonte)
 
     df = load_timeseries(fonte=fonte)
-    minimo = LSTM_WINDOW + FORECAST_HORIZON_STEPS
+    minimo = janela + horizonte
     if len(df) < minimo * 2:
         raise ValueError(
-            f"Serie da fonte '{fonte}' tem apenas {len(df)} leituras; "
+            f"Serie da fonte '{fonte}' tem apenas {len(df)} pontos; "
             f"o LSTM precisa de pelo menos {minimo * 2} "
-            f"(janela {LSTM_WINDOW} + horizonte {FORECAST_HORIZON_STEPS}, treino e teste)."
+            f"(janela {janela} + horizonte {horizonte}, treino e teste)."
         )
     train_df, test_df = train_test_split_series(df, test_frac=0.20)
 
@@ -136,30 +139,29 @@ def run(target: str = "pH", epochs: int = 200, batch_size: int = 64,
     if fonte == "api":
         ts_train = train_df["timestamp"].values
         ts_test = test_df["timestamp"].values
-        intervalo = float(pd.Series(df["timestamp"]).diff().dt.total_seconds().median() / 60)
-        max_gap = MAX_GAP_FACTOR * max(intervalo, 1e-6)
+        max_gap = MAX_GAP_FACTOR * intervalo_amostragem(fonte)
 
     X_train, d_train, _, _ = build_supervised_delta(
-        train_scaled, target_train_raw, LSTM_WINDOW, target_idx,
+        train_scaled, target_train_raw, janela, target_idx, horizon=horizonte,
         timestamps=ts_train, max_gap_min=max_gap)
 
     # concatena o fim de treino para gerar as janelas iniciais de teste
-    combined_scaled = np.concatenate([train_scaled[-LSTM_WINDOW:], test_scaled], axis=0)
-    combined_raw    = np.concatenate([target_train_raw[-LSTM_WINDOW:], target_test_raw])
-    combined_ts = (np.concatenate([ts_train[-LSTM_WINDOW:], ts_test])
+    combined_scaled = np.concatenate([train_scaled[-janela:], test_scaled], axis=0)
+    combined_raw    = np.concatenate([target_train_raw[-janela:], target_test_raw])
+    combined_ts = (np.concatenate([ts_train[-janela:], ts_test])
                    if ts_train is not None else None)
     X_test, d_test, y_ref_test, y_true = build_supervised_delta(
-        combined_scaled, combined_raw, LSTM_WINDOW, target_idx,
+        combined_scaled, combined_raw, janela, target_idx, horizon=horizonte,
         timestamps=combined_ts, max_gap_min=max_gap)
 
     if len(X_train) == 0 or len(X_test) == 0:
         raise ValueError(
-            f"Nenhuma janela continua de {LSTM_WINDOW}+{FORECAST_HORIZON_STEPS} passos "
+            f"Nenhuma janela continua de {janela}+{horizonte} passos "
             f"sobrou na fonte '{fonte}' apos descartar as que cruzam lacunas de coleta. "
-            "Colete um historico mais continuo ou reduza LSTM_WINDOW."
+            "Colete um historico mais continuo ou reduza LSTM_WINDOW_MIN."
         )
 
-    model = build_model(LSTM_WINDOW, len(features))
+    model = build_model(janela, len(features))
     early = tf.keras.callbacks.EarlyStopping(
         monitor="val_loss", patience=20, restore_best_weights=True
     )
@@ -182,8 +184,8 @@ def run(target: str = "pH", epochs: int = 200, batch_size: int = 64,
         "target":      target,
         "fonte":       fonte,
         "features":    features,
-        "window":      LSTM_WINDOW,
-        "horizon":     FORECAST_HORIZON_STEPS,
+        "window":      janela,
+        "horizon":     horizonte,
         "train_size":  len(X_train),
         "test_size":   len(X_test),
         "y_true":      y_true.tolist(),

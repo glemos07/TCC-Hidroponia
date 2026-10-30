@@ -11,10 +11,12 @@ import streamlit as st
 
 from app_utils import header, sidebar_info, PH_MIN, PH_MAX, EC_MIN, EC_MAX
 from src.config import (
-    FORECAST_HORIZON_STEPS,
-    LSTM_WINDOW,
     MAX_GAP_FACTOR,
     features_de,
+    horizonte_min,
+    intervalo_amostragem,
+    janela_min,
+    passos_janela,
 )
 from src.data_loader import plantas_api
 from src.database import fetch_df
@@ -42,6 +44,7 @@ header("Previsao de pH e CE por planta",
 fonte = "api"
 features = features_de(fonte)
 st.caption("Fonte: sensores do ESP32 | vetor de entrada: " + ", ".join(features))
+JANELA = passos_janela(fonte)
 
 ingeridas = plantas_api()
 if ingeridas.empty or int(ingeridas["leituras"].max() or 0) == 0:
@@ -82,17 +85,18 @@ with col_l:
 
 with col_r:
     st.info(
-        f"Janela de contexto do LSTM: **{LSTM_WINDOW}** leituras\n\n"
-        f"Cada passo previsto corresponde a **{FORECAST_HORIZON_STEPS} intervalos** de coleta a frente."
+        f"Contexto do LSTM: **{janela_min(fonte) / 60:.0f} h** "
+        f"({JANELA} pontos de {intervalo_amostragem(fonte)} min)\n\n"
+        f"Cada passo previsto avanca **{horizonte_min(fonte) / 60:.0f} h**."
     )
 
-# so a janela do modelo: a tela plota as ultimas LSTM_WINDOW leituras, e
-# varrer o historico inteiro custaria 5x mais a cada interacao
-hist = load_plant_history(int(id_plant), fonte=fonte, janela=LSTM_WINDOW)
-if len(hist) < LSTM_WINDOW:
+# so a janela do modelo: a tela plota os ultimos JANELA pontos, e varrer o
+# historico inteiro custaria varias vezes mais a cada interacao
+hist = load_plant_history(int(id_plant), fonte=fonte, janela=JANELA)
+if len(hist) < JANELA:
     st.warning(
-        f"Planta possui apenas {len(hist)} leituras completas. "
-        f"O LSTM precisa de pelo menos {LSTM_WINDOW}."
+        f"Planta possui apenas {len(hist)} pontos na grade de "
+        f"{intervalo_amostragem(fonte)} min. O LSTM precisa de {JANELA}."
     )
     st.stop()
 
@@ -113,7 +117,7 @@ for coluna, feature in zip(colunas, features):
 
 st.caption(f"Ultima leitura: {pd.Timestamp(last['timestamp']):%d/%m/%Y %H:%M:%S}")
 
-lacuna = hist.tail(LSTM_WINDOW)["timestamp"].diff().dropna().dt.total_seconds().max() / 60
+lacuna = hist.tail(JANELA)["timestamp"].diff().dropna().dt.total_seconds().max() / 60
 intervalo = hist["timestamp"].diff().dropna().dt.total_seconds().median() / 60
 if pd.notna(lacuna) and lacuna > MAX_GAP_FACTOR * max(intervalo, 1e-6):
     st.warning(
@@ -193,7 +197,7 @@ st.markdown("### Trajetoria prevista")
 traj_pH = predict_trajectory(int(id_plant), target="pH", steps_ahead=steps_ahead, fonte=fonte)
 traj_EC = predict_trajectory(int(id_plant), target="EC", steps_ahead=steps_ahead, fonte=fonte)
 
-hist_tail = hist.tail(LSTM_WINDOW).copy()
+hist_tail = hist.tail(JANELA).copy()
 
 
 def _plot(hist_df, traj_df, target, ideal_lo, ideal_hi, cor):

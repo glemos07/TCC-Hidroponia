@@ -24,10 +24,31 @@ EC_MIN, EC_MAX = 1.0, 3.5
 # grandezas que o hardware realmente mede, e dela saem tanto as linhas da
 # tabela SENSOR quanto as features dos modelos.
 
-FORECAST_HORIZON_MIN = 60         # extremo superior das faixas 15-60 min do doc
-SAMPLING_INTERVAL_MIN = 1         # passo da serie reamostrada
-FORECAST_HORIZON_STEPS = FORECAST_HORIZON_MIN // SAMPLING_INTERVAL_MIN  # = 60 passos
-LSTM_WINDOW = 240                 # 4 horas de contexto (240 * 1 min)
+# ---------------------------------------------------------------------------
+# Horizonte e janela, em MINUTOS
+#
+# Antes eram contados em passos, o que deu problema: o dataset Kaggle vem
+# reamostrado a 1 min e os sensores publicam a cada ~1,6 min, entao "60 passos"
+# significava 60 min numa fonte e 96 min na outra. Definindo em minutos, cada
+# fonte converte pelo proprio intervalo de amostragem.
+# ---------------------------------------------------------------------------
+# Por fonte, porque as duas tem regimes diferentes:
+#  - kaggle: 60 min, o valor especificado no documento (faixas 15-60 min).
+#    Mantido intacto para nao invalidar o Quadro 6 ja escrito.
+#  - api: 24 h. Nos sensores reais, a 96 min o movimento a prever (0,094 de pH)
+#    mal supera o ruido de leitura (0,061) - relacao sinal/ruido de 1,5x. Em
+#    24 h sobe para 5,5x. A janela fica em 6 h porque a coleta tem 25
+#    interrupcoes e exigir 24 h+24 h continuas deixaria 13 amostras de treino.
+FORECAST_HORIZON_MIN = {"kaggle": 60,  "api": 1440}
+LSTM_WINDOW_MIN      = {"kaggle": 240, "api": 360}
+
+SAMPLING_INTERVAL_MIN = 1         # grade do dataset Kaggle
+
+#: Grade em que a telemetria do ESP32 e reamostrada antes de alimentar os
+#: modelos. A 1,6 min o ruido de leitura (0,06 de pH) e maior que o sinal em
+#: horizontes curtos, e uma janela de 24 h exigiria 900 passos. Reamostrar
+#: suaviza e torna a janela tratavel.
+API_RESAMPLE_MIN = 15
 
 
 # ---------------------------------------------------------------------------
@@ -108,3 +129,28 @@ def features_de(fonte: str = "kaggle") -> list[str]:
         return list(FEATURE_SETS[fonte])
     except KeyError:
         raise ValueError(f"Fonte desconhecida: {fonte!r}. Use {sorted(FEATURE_SETS)}.") from None
+
+
+def intervalo_amostragem(fonte: str = "kaggle") -> int:
+    """Minutos entre pontos da serie, depois do pre-processamento da fonte."""
+    return API_RESAMPLE_MIN if fonte == "api" else SAMPLING_INTERVAL_MIN
+
+
+def horizonte_min(fonte: str = "kaggle") -> int:
+    """Quantos minutos a frente esta fonte preve."""
+    return FORECAST_HORIZON_MIN[fonte]
+
+
+def janela_min(fonte: str = "kaggle") -> int:
+    """Quantos minutos de contexto o LSTM recebe nesta fonte."""
+    return LSTM_WINDOW_MIN[fonte]
+
+
+def passos_horizonte(fonte: str = "kaggle") -> int:
+    """Passos da serie correspondentes ao horizonte desta fonte."""
+    return max(1, horizonte_min(fonte) // intervalo_amostragem(fonte))
+
+
+def passos_janela(fonte: str = "kaggle") -> int:
+    """Passos de contexto que o LSTM recebe nesta fonte."""
+    return max(1, janela_min(fonte) // intervalo_amostragem(fonte))

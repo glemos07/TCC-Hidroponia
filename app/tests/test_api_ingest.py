@@ -227,8 +227,10 @@ def test_backtest_alinha_previsto_com_o_real_correto(db, monkeypatch):
 
     from src import predict as mod
 
-    monkeypatch.setattr(mod, "LSTM_WINDOW", 3)
-    monkeypatch.setattr(mod, "FORECAST_HORIZON_STEPS", 2)
+    # janela e horizonte agora vem da config, por fonte
+    monkeypatch.setattr(mod, "passos_janela", lambda fonte: 3)
+    monkeypatch.setattr(mod, "passos_horizonte", lambda fonte: 2)
+    monkeypatch.setattr(mod, "API_RESAMPLE_MIN", None)   # sem reamostrar no teste
 
     n = 20
     bruto = _bruto(n)
