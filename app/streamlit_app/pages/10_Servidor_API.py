@@ -161,10 +161,40 @@ def painel_ao_vivo(limite: int, sincronizar_tambem: bool, prever_tambem: bool):
         except ApiIndisponivel as e:
             st.warning(f"Importacao automatica falhou: {e}")
 
+    _pulso(recentes)
     _desenhar(recentes)
     if prever_tambem:
         _prever_ao_vivo()
-    st.caption(f"Atualizado em {datetime.now():%H:%M:%S}")
+    st.caption(f"Tela atualizada em {datetime.now():%H:%M:%S}")
+
+
+def _pulso(recentes: pd.DataFrame):
+    """
+    Idade da leitura mais recente e quando esperar a proxima.
+
+    O valor previsto muda na quarta casa decimal a cada leitura, o que na tela
+    parece congelado. Esta linha mostra que a coleta esta viva sem fingir uma
+    precisao que a previsao nao tem.
+    """
+    if recentes.empty:
+        return
+    ultima = pd.Timestamp(recentes["timestamp"].iloc[-1])
+    idade = (datetime.now() - ultima.to_pydatetime()).total_seconds()
+
+    cadencia = recentes["timestamp"].diff().dt.total_seconds().median()
+    cadencia = float(cadencia) if pd.notna(cadencia) and cadencia > 0 else 90.0
+    falta = max(0, cadencia - idade)
+
+    if idade <= cadencia * 2:
+        st.success(
+            f"Coleta ativa — ultima leitura as {ultima:%H:%M:%S}, ha {idade:.0f} s. "
+            f"O ESP32 publica a cada {cadencia:.0f} s; proxima em ~{falta:.0f} s."
+        )
+    else:
+        st.warning(
+            f"Sem leitura nova ha {idade / 60:.0f} min (ultima as {ultima:%d/%m %H:%M:%S}). "
+            f"O esperado e uma a cada {cadencia:.0f} s - verifique o ESP32 ou a rede."
+        )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -199,9 +229,9 @@ def _prever_ao_vivo():
             continue
 
         coluna.metric(
-            f"{alvo} previsto (+{r['horizon_min']:.0f} min)",
+            f"{alvo} previsto para {r['future_timestamp']:%d/%m %Hh}",
             f"{r['predicted']:.3f}",
-            delta=f"{r['predicted'] - r['last_value']:+.3f}",
+            delta=f"{r['predicted'] - r['last_value']:+.3f} vs agora",
         )
 
         # a previsao sozinha nao diz se e confiavel; o erro medido nos
