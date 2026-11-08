@@ -26,23 +26,7 @@ header(
     "Previsao de pH, CE e nutrientes com series temporais (ARIMA e LSTM)",
 )
 
-st.markdown("""
-Este prototipo integra:
-
-- **Coleta IoT** via API REST (FastAPI): o ESP32 publica a telemetria no servidor
-  e a aplicacao importa as leituras. **Todo o historico do banco vem dos
-  sensores** - nao ha dados gerados artificialmente.
-- **Banco relacional SQLite** com 10 entidades (FARM_STATUS, PLANTS, AMBIENT, USERS,
-  SENSOR, MONITORING, SENSOR_DATA, NUTRIENT, MONITORING_NUTRIENT, FARM). O seed
-  carrega apenas catalogos de referencia; as demais tabelas nascem vazias.
-- **Modelos preditivos** ARIMA (baseline univariado) e LSTM multivariado, treinados
-  sobre a telemetria real do ESP32 (pH, CE, temperatura da solucao, temperatura
-  do ar). O dataset publico do Kaggle fica disponivel so como base de
-  comparacao do Quadro 6, lido do CSV e sem entrar no banco.
-- **Interface Streamlit** cobrindo os 7 requisitos funcionais RF01-RF07.
-
-Use o menu lateral para navegar entre as telas.
-""")
+st.markdown("Use o menu lateral para navegar entre as telas.")
 
 st.markdown("### Requisitos funcionais implementados")
 st.table({
